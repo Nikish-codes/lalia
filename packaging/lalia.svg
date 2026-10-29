@@ -1,15 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Lalia: a λ (from λαλιά, "speech") speaking two sound waves.
+       Same geometry as src/icon.rs, which draws the tray and window icons. -->
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4c8bf5"/>
-      <stop offset="1" stop-color="#7a5cf0"/>
+    <linearGradient id="bg" x1="20.48" y1="20.48" x2="491.52" y2="491.52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C4DFF"/>
+      <stop offset="1" stop-color="#1FB6D9"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="20.48" x2="0" y2="281.6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
     </linearGradient>
   </defs>
-  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#g)"/>
-  <!-- microphone capsule -->
-  <rect x="54" y="28" width="20" height="40" rx="10" fill="#fff"/>
-  <!-- stand -->
-  <path d="M42 60a22 22 0 0 0 44 0" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
-  <line x1="64" y1="82" x2="64" y2="96" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
-  <line x1="50" y1="98" x2="78" y2="98" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+  <path d="M131.17 20.48H380.83C449.46 20.48 491.52 62.54 491.52 131.17V380.83C491.52 449.46 449.46 491.52 380.83 491.52H131.17C62.54 491.52 20.48 449.46 20.48 380.83V131.17C20.48 62.54 62.54 20.48 131.17 20.48Z" fill="url(#bg)"/>
+  <path d="M131.17 20.48H380.83C449.46 20.48 491.52 62.54 491.52 131.17V380.83C491.52 449.46 449.46 491.52 380.83 491.52H131.17C62.54 491.52 20.48 449.46 20.48 380.83V131.17C20.48 62.54 62.54 20.48 131.17 20.48Z" fill="url(#gloss)"/>
+  <g fill="none" stroke="#fff" stroke-linecap="round">
+    <path d="M104.96 125.44Q156.16 102.4 181.76 156.16L291.84 396.8M228.86 258.56L130.56 396.8" stroke-width="53.76"/>
+    <path d="M348.7 175.92A84.48 84.48 0 0 1 348.7 305.36" stroke-width="44.08" stroke-opacity=".95"/>
+    <path d="M384.9 132.78A140.8 140.8 0 0 1 384.9 348.5" stroke-width="44.08" stroke-opacity=".6"/>
+  </g>
 </svg>

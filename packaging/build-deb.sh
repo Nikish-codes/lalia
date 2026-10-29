@@ -21,15 +21,24 @@ mkdir -p "$stage/DEBIAN" \
          "$stage/usr/bin" \
          "$stage/usr/share/applications" \
          "$stage/usr/share/icons/hicolor/scalable/apps" \
-         "$stage/usr/lib/systemd/user" \
          "$stage/usr/share/doc/lalia"
 
 echo "==> Assembling package tree"
 install -m 0755 "$root/target/release/lalia" "$stage/usr/bin/lalia"
 install -m 0644 "$root/packaging/lalia.desktop" "$stage/usr/share/applications/lalia.desktop"
 install -m 0644 "$root/packaging/lalia.svg" "$stage/usr/share/icons/hicolor/scalable/apps/lalia.svg"
-install -m 0644 "$root/packaging/lalia.service" "$stage/usr/lib/systemd/user/lalia.service"
+# PNG icons for panels and menus that don't render SVG, drawn by the binary.
+icons="$root/dist/icons"
+"$root/target/release/lalia" render-icons "$icons" >/dev/null
+for size in 16 22 24 32 48 64 128 256 512; do
+  dir="$stage/usr/share/icons/hicolor/${size}x${size}/apps"
+  mkdir -p "$dir"
+  install -m 0644 "$icons/lalia-$size.png" "$dir/lalia.png"
+done
+rm -rf "$icons"
 install -m 0644 "$root/README.md" "$stage/usr/share/doc/lalia/README.md"
+install -m 0644 "$root/LICENSE" "$stage/usr/share/doc/lalia/copyright"
+install -m 0644 "$root/assets/fonts/Inter-LICENSE.txt" "$stage/usr/share/doc/lalia/Inter-LICENSE.txt"
 
 cat > "$stage/DEBIAN/control" <<EOF
 Package: lalia
@@ -37,8 +46,8 @@ Version: $version
 Section: utils
 Priority: optional
 Architecture: $arch
-Depends: xdotool, libasound2
-Recommends: libnotify-bin, libcanberra-gtk3-module
+Depends: xdotool, libasound2t64 | libasound2, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon-x11-0, libegl1, libgl1
+Recommends: libnotify-bin, libcanberra-gtk3-module, xdg-utils
 Maintainer: Lalia <noreply@localhost>
 Homepage: https://github.com/Nikish-codes/lalia
 Description: Lalia — system-wide live dictation for Linux (X11)
@@ -46,9 +55,11 @@ Description: Lalia — system-wide live dictation for Linux (X11)
  window. Uses Gemini 3.5 Transcribe Live (the same model Antigravity's
  record button uses). Greek λαλιά = "speech".
  .
- Features: push-to-talk or toggle, a pause hotkey, streaming or on-release
- insertion, verbatim or smart formatting, custom vocabulary, desktop
- notifications and sound, and optional start-on-login.
+ Lives in the system tray, shows a small on-screen indicator with a live
+ level meter while you talk, and has a settings window with guided setup,
+ history and every option: push-to-talk or toggle, a pause hotkey,
+ streaming or on-release insertion, verbatim or smart formatting, custom
+ vocabulary, microphone choice and start-on-login.
 EOF
 
 cat > "$stage/DEBIAN/postinst" <<'EOF'
@@ -65,24 +76,14 @@ cat <<'MSG'
 
 Lalia installed.
 
-  1) Store your Gemini API key:   lalia set-key
-     (get one at https://aistudio.google.com/apikey)
-  2) Run it:                      lalia
-  3) Start at login:             lalia autostart enable
+  Open "Lalia" from your applications menu (or run `lalia`).
+  The setup window walks you through the API key and microphone.
 
 Hold F12 to dictate. F11 pauses/resumes.
 MSG
 EOF
 chmod 0755 "$stage/DEBIAN/postinst"
 
-cat > "$stage/DEBIAN/prerm" <<'EOF'
-#!/bin/sh
-set -e
-# Stop any user service on uninstall (best effort, non-fatal).
-systemctl --user disable --now lalia.service 2>/dev/null || true
-exit 0
-EOF
-chmod 0755 "$stage/DEBIAN/prerm"
 
 mkdir -p "$root/dist"
 deb="$root/dist/lalia_${version}_${arch}.deb"

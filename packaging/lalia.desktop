@@ -2,10 +2,11 @@
 Type=Application
 Name=Lalia
 GenericName=Voice Dictation
-Comment=System-wide live dictation — hold F12 and speak (Greek λαλιά, "speech")
+Comment=Dictate into any app — hold F12 and speak (Greek λαλιά, "speech")
 Exec=lalia
 Icon=lalia
 Terminal=false
 Categories=Utility;Accessibility;
-Keywords=dictation;speech;voice;transcription;stt;
+Keywords=dictation;speech;voice;transcription;stt;microphone;typing;
 StartupNotify=false
+StartupWMClass=lalia

@@ -1,8 +1,8 @@
 [package]
 name = "lalia"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Lalia — system-wide live dictation for Linux (X11), powered by Gemini 3.5 Transcribe Live"
+description = "Lalia — system-wide live dictation for Linux (X11) with a tray icon and settings window, powered by Gemini 3.5 Transcribe Live"
 license = "MIT"
 authors = ["Lalia contributors"]
 
@@ -11,7 +11,7 @@ name = "lalia"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "0.3"
@@ -20,8 +20,14 @@ serde_json = "1"
 toml = "0.8"
 anyhow = "1"
 cpal = "0.15"
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["randr", "xfixes", "shape"] }
 base64 = "0.22"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "x11", "links"] }
+egui-phosphor = "0.14"
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
+tiny-skia = "0.12"
+ab_glyph = "0.2"
+arboard = { version = "3", default-features = false }
 
 [profile.release]
 opt-level = 3

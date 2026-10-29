@@ -1,3 +1,5 @@
+<p align="center"><img src="packaging/lalia.svg" width="112" alt="Lalia icon"></p>
+
 # Lalia
 
 [![CI](https://github.com/Nikish-codes/lalia/actions/workflows/ci.yml/badge.svg)](https://github.com/Nikish-codes/lalia/actions/workflows/ci.yml)
@@ -8,6 +10,12 @@
 
 Hold **F12**, speak, and the text is typed straight into **whatever window is
 focused** — browser, editor, terminal, chat, anywhere. Release to finish.
+Lalia lives in your **system tray**, shows a small **on-screen indicator** with a
+live level meter and the words it hears, and has a **settings window** with a
+guided first-run setup.
+
+![Lalia settings window](docs/settings.png)
+![The on-screen indicator while dictating](docs/overlay.png)
 
 It runs on **Gemini 3.5 Transcribe Live** — the exact model and technique
 Antigravity's record button uses (the Live API's `BidiGenerateContent` +
@@ -27,25 +35,25 @@ Download the latest `.deb` from the
 [**Releases page**](https://github.com/Nikish-codes/lalia/releases), then:
 
 ```bash
-sudo apt install ./lalia_0.2.0_amd64.deb    # or: sudo dpkg -i lalia_*.deb
-lalia set-key        # paste your Gemini API key (AIza… or AQ.Ab…)
-lalia                # start it
+sudo apt install ./lalia_0.3.0_amd64.deb    # or: sudo dpkg -i lalia_*.deb
 ```
 
+Open **Lalia** from your applications menu. The first time, a setup window asks
+for your Gemini API key (it checks the key for you), lets you test your
+microphone and pick your keys, and gives you a box to try dictating into.
+
 Build the package yourself with `./packaging/build-deb.sh` (output in `dist/`).
-The `.deb` installs the `lalia` command, a menu entry, an icon, and a systemd
-user unit (disabled by default).
 
 ### Option B — from source
 
 ```bash
-sudo apt install -y xdotool libasound2-dev
+sudo apt install -y xdotool libasound2-dev pkg-config
 cargo build --release
 sudo install -m755 target/release/lalia /usr/local/bin/lalia
-lalia set-key
+lalia
 ```
 
-or just `./install.sh` (installs to `~/.local/bin`).
+or just `./install.sh` (installs to `~/.local/bin` and adds a menu entry).
 
 You need a Gemini API key: <https://aistudio.google.com/apikey>.
 The free tier covers this model at **$0**.
@@ -54,36 +62,46 @@ The free tier covers this model at **$0**.
 
 | Feature | How |
 |---|---|
+| **Tray icon** | Colour shows the state (ready, listening, paused, needs setup). Left-click: settings. Middle-click: pause. Menu: mode, typing, hotkey style, recent dictations, start on login |
+| **On-screen indicator** | A pill at the bottom (or top) of the screen with a level meter and live text. Click-through, never steals focus |
+| **Settings window** | Guided setup, all options, searchable history, light and dark themes |
 | **Push-to-talk or toggle** | `activation = "hold"` (default) or `"toggle"` — tap to start/stop |
 | **Pause everything** | Tap **F11** to pause/resume; F12 is inert while paused |
-| **Streaming or on-release insert** | Type words as you speak, or paste the whole thing at the end |
+| **Any key you like** | F1–F35, Pause, Scroll Lock, Insert, Menu, Right Ctrl, Right Alt, Right Super |
+| **Streaming or on-release insert** | Type phrases as you speak, or type the whole thing at the end |
 | **Verbatim or smart** | `VERBATIM` (raw) or `SMART` (punctuation, casing, filler removal, lists) |
 | **Custom vocabulary** | Bias recognition toward names/jargon (`vocabulary = [...]`) |
 | **Language hints / auto-detect** | `language = "en-US"` or `""` for auto |
-| **Notifications + sound** | Desktop toast and themed sound on start/stop/pause |
-| **Start on login** | `lalia autostart enable` (systemd `--user`) |
-| **Start paused** | `start_enabled = false` |
-| **Single instance** | A second launch exits politely |
-| **Configurable hotkeys** | Any `F1`–`F35` for both dictate and pause |
+| **Microphone choice** | Pick an input device; test it with a live meter |
+| **History** | Every dictation saved locally; copy any of them again from the window or tray |
+| **Command line control** | `lalia toggle` — bind it to any shortcut in your desktop settings |
+| **Start on login** | `lalia autostart enable` or the toggle in the window/tray |
+| **Single instance** | Launching Lalia again opens its settings window |
 
 ## Usage
 
 ```bash
-lalia                    # run (hold F12 to dictate)
+lalia                    # run in the tray (opens setup the first time)
+lalia gui [page]         # settings window: home|setup|dictation|feedback|history|about
+lalia toggle             # start/stop dictation in the running Lalia
+lalia pause | resume     # same as F11
+lalia status             # state as JSON
+lalia quit
 lalia selftest 8         # capture 8s, print transcripts, type nothing
-lalia set-key            # store the API key (0600)
+lalia set-key            # store the API key from stdin (0600)
 lalia config             # show resolved settings + paths
-lalia generate-config    # write ~/.config/lalia/config.toml
+lalia generate-config    # write a commented ~/.config/lalia/config.toml
 lalia autostart enable|disable|status
 lalia help
 ```
 
 ## Configuration
 
-`~/.config/lalia/config.toml` (created by `lalia generate-config`):
+Everything is in the settings window. It saves to `~/.config/lalia/config.toml`
+and the running Lalia picks up changes within a second (hand edits too):
 
 ```toml
-hotkey = "F12"           # dictate key
+hotkey = "F12"           # dictate key (F1–F35, Pause, ScrollLock, Insert, Menu, RightCtrl, RightAlt, RightSuper)
 pause_hotkey = "F11"     # pause/resume key
 activation = "hold"      # "hold" | "toggle"
 insert = "streaming"     # "streaming" | "on_release"
@@ -91,54 +109,73 @@ mode = "VERBATIM"        # "VERBATIM" | "SMART"
 language = ""            # e.g. "en-US", empty = auto-detect
 vocabulary = []          # e.g. ["Kubernetes", "ConnectRPC"]
 model = "gemini-3.5-transcribe-live"
+input_device = ""        # microphone name, empty = system default
 type_delay_ms = 2        # raise to 4-6 if an app drops characters
+overlay = true           # on-screen indicator while dictating
+overlay_position = "bottom"
 notify = true
 sound = true
+history = true           # keep a local history (~/.local/share/lalia)
 start_enabled = true     # false = start paused
 ```
 
 Environment variables override the file (`LALIA_HOTKEY`, `LALIA_MODE`,
-`LALIA_VOCAB`, `LALIA_ACTIVATION`, `GEMINI_API_KEY`, …). See `lalia help`.
+`LALIA_VOCAB`, `LALIA_ACTIVATION`, `LALIA_OVERLAY`, `GEMINI_API_KEY`, …). See `lalia help`.
 
 ## Run on login
 
 ```bash
-lalia autostart enable     # creates ~/.config/systemd/user/lalia.service
+lalia autostart enable     # writes ~/.config/autostart/lalia.desktop
 lalia autostart status
-journalctl --user -u lalia -f
 ```
+
+Lalia starts inside your desktop session (so it gets the right display and the
+tray). Older versions used a systemd user unit; enabling or disabling removes it.
 
 ## Troubleshooting
 
-* **"hotkey 'F12' not found"** → unusual layout; set another `hotkey`.
+* **No tray icon on GNOME** → install/enable the *AppIndicator and KStatusNotifierItem
+  Support* extension (Ubuntu ships it). Cinnamon, KDE, XFCE and MATE show it out of the box.
+* **"Microphone unavailable"** → pick another input in *Dictation → Microphone* and
+  press *Test microphone*.
+* **"API key problem"** → *Setup → Connect to Gemini*, paste a new key, *Verify & save*.
 * **Text lands in the wrong place** → click the target field first; xdotool types
   into the *focused* window.
-* **Characters dropped in some apps** → `type_delay_ms = 6`.
+* **Characters dropped in some apps** → *Dictation → Advanced → Typing speed* (4–6 ms).
 * **Nothing transcribed** → `lalia selftest 8`; if you don't see `ready
   (streaming)`, it's the key/model (the error is printed).
-* **Paused by accident** → tap the pause key (F11); you'll get a toast + sound.
+* **Paused by accident** → tap the pause key (F11); the indicator tells you.
 
 ## Requirements
 
 Linux with **X11** (verified on Cinnamon). `xdotool` for typing, `libasound2`
-for audio, `libnotify-bin` / `libcanberra-gtk3-module` optional for
-notifications and sound. **Wayland** is not supported yet (needs the
-GlobalShortcuts portal + `wtype`).
+for audio, OpenGL (Mesa) for the settings window, `libnotify-bin` /
+`libcanberra-gtk3-module` optional for notifications and sound. **Wayland** is
+not supported yet (needs the GlobalShortcuts portal + `wtype`).
 
 ## Layout
 
 ```
-src/hotkey.rs     global F12/F11 detection (X11 keymap polling, no key grab)
-src/audio.rs      mic capture (cpal) → downmix + resample → 16 kHz mono PCM16
-src/gemini.rs     Live API WebSocket: setup, stream audio, parse interim/final
-src/inject.rs     types text into the focused window (xdotool / XTEST)
-src/notify.rs     desktop notifications + themed sound
-src/autostart.rs  systemd --user "start on login"
+src/main.rs       CLI entry point and subcommands
+src/app.rs        the daemon: state machine, sessions, control socket, config reload
+src/hotkey.rs     global hotkeys (X11 keymap polling, no key grab), live re-binding
+src/audio.rs      mic capture (cpal) → downmix + resample → 16 kHz mono PCM16, level meter
+src/gemini.rs     Live API WebSocket: setup, stream audio, parse interim/final, key check
+src/inject.rs     ordered typing queue (xdotool) + segment spacing
+src/tray.rs       system-tray icon and menu (StatusNotifierItem)
+src/overlay.rs    on-screen indicator (raw X11 window, tiny-skia drawing)
+src/gui.rs        settings window (egui): setup, settings, history, about
+src/icon.rs       the λ icon, drawn in code for every size and state
+src/history.rs    local dictation history (JSON lines)
+src/ipc.rs        control sockets in $XDG_RUNTIME_DIR/lalia
 src/config.rs     config file + env resolution
-src/main.rs       state machine, CLI, pause, single-instance guard
-packaging/        .deb build (control, desktop, icon, unit)
+src/autostart.rs  XDG autostart entry
+src/notify.rs     desktop notifications + themed sound
+packaging/        .deb build, desktop entry, icon
+assets/fonts/     Inter (SIL OFL) for the indicator and window
 ```
 
 ## License
 
-MIT
+MIT. Bundles the Inter typeface (SIL Open Font License, see
+`assets/fonts/Inter-LICENSE.txt`) and Phosphor icons (MIT, via `egui-phosphor`).

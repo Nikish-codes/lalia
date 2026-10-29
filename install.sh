@@ -13,10 +13,11 @@ echo "==> Installing to $bin"
 mkdir -p "$HOME/.local/bin"
 install -m 0755 "$here/target/release/lalia" "$bin"
 
-if [ ! -s "$HOME/.config/lalia/key" ]; then
-  echo "==> No API key yet. Get one at https://aistudio.google.com/apikey"
-  "$bin" set-key
-fi
+# Menu entry + icon so Lalia shows up in the applications menu.
+apps="$HOME/.local/share/applications"
+mkdir -p "$apps" "$HOME/.local/share/icons/hicolor/scalable/apps"
+sed "s|^Exec=lalia|Exec=$bin|" "$here/packaging/lalia.desktop" > "$apps/lalia.desktop"
+install -m 0644 "$here/packaging/lalia.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/lalia.svg"
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
@@ -27,11 +28,10 @@ cat <<EOF
 
 Done.
 
-  Run now:            lalia
+  Run now:            lalia          (opens setup the first time)
+  Settings window:    lalia gui
   Quick mic test:     lalia selftest 8
   Start on login:     lalia autostart enable
-  Show settings:      lalia config
-  Edit settings:      ~/.config/lalia/config.toml
 
-Hold F12 to dictate. F11 pauses/resumes.
+Hold F12 to dictate. F11 pauses/resumes. Lalia lives in your tray.
 EOF
