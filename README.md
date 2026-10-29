@@ -36,7 +36,7 @@ Download the latest `.deb` from the
 [**Releases page**](https://github.com/Nikish-codes/lalia/releases), then:
 
 ```bash
-sudo apt install ./lalia_0.3.0_amd64.deb    # or: sudo dpkg -i lalia_*.deb
+sudo apt install ./lalia_0.3.1_amd64.deb    # or: sudo dpkg -i lalia_*.deb
 ```
 
 Open **Lalia** from your applications menu. The first time, a setup window asks
