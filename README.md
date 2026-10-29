@@ -23,6 +23,9 @@ F12 released ──► xdotool types text ────────┘  into the 
 
 ### Option A — .deb (one command)
 
+Download the latest `.deb` from the
+[**Releases page**](https://github.com/Nikish-codes/lalia/releases), then:
+
 ```bash
 sudo apt install ./lalia_0.2.0_amd64.deb    # or: sudo dpkg -i lalia_*.deb
 lalia set-key        # paste your Gemini API key (AIza… or AQ.Ab…)
