@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lalia
+GenericName=Voice Dictation
+Comment=System-wide live dictation — hold F12 and speak (Greek λαλιά, "speech")
+Exec=lalia
+Icon=lalia
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;speech;voice;transcription;stt;
+StartupNotify=false

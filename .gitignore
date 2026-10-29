@@ -1,0 +1,12 @@
+# Rust build output
+/target/
+
+# Packaged artifacts
+/dist/
+
+# Editor / OS cruft
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/

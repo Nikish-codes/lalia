@@ -1,0 +1,30 @@
+[package]
+name = "lalia"
+version = "0.2.0"
+edition = "2021"
+description = "Lalia — system-wide live dictation for Linux (X11), powered by Gemini 3.5 Transcribe Live"
+license = "MIT"
+authors = ["Lalia contributors"]
+
+[[bin]]
+name = "lalia"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+cpal = "0.15"
+x11rb = "0.13"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
