@@ -7,6 +7,7 @@
 mod app;
 mod audio;
 mod autostart;
+mod buddy;
 mod config;
 mod gemini;
 mod gui;
@@ -58,6 +59,7 @@ fn main() -> anyhow::Result<()> {
         }
         // Developer helpers: icon PNGs and an overlay preview.
         Some("render-icons") => icon::export(std::path::Path::new(arg(1).unwrap_or("icons"))),
+        Some("render-buddy") => buddy::film(std::path::Path::new(arg(1).unwrap_or("buddy"))),
         Some("render-overlay") => overlay::preview(
             std::path::Path::new(arg(1).unwrap_or("overlay.png")),
             overlay::Phase::Listening,

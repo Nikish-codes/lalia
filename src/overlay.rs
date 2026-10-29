@@ -26,7 +26,8 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 use crate::audio::Level;
-use crate::config::OverlayPosition;
+use crate::buddy;
+use crate::config::{OverlayPosition, OverlayStyle};
 use crate::icon::{self, IconState};
 
 pub static FONT_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
@@ -46,6 +47,7 @@ pub enum Phase {
 struct Model {
     enabled: bool,
     position: OverlayPosition,
+    style: OverlayStyle,
     visible: bool,
     phase: Phase,
     label: String,
@@ -62,10 +64,11 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn start(enabled: bool, position: OverlayPosition) -> Self {
+    pub fn start(enabled: bool, position: OverlayPosition, style: OverlayStyle) -> Self {
         let model = Arc::new(Mutex::new(Model {
             enabled,
             position,
+            style,
             visible: false,
             phase: Phase::Connecting,
             label: String::new(),
@@ -90,10 +93,11 @@ impl Overlay {
         let _ = self.wake.send(());
     }
 
-    pub fn configure(&self, enabled: bool, position: OverlayPosition) {
+    pub fn configure(&self, enabled: bool, position: OverlayPosition, style: OverlayStyle) {
         self.update(|m| {
             m.enabled = enabled;
             m.position = position;
+            m.style = style;
         });
     }
 
@@ -158,6 +162,8 @@ struct Surface {
     gc: Gcontext,
     depth: u8,
     argb: bool,
+    /// Drawing the animated buddy (else the pill).
+    buddy: bool,
     w: u16,
     h: u16,
     mapped: bool,
@@ -251,6 +257,7 @@ fn create_surface(
     screen: &Screen,
     scale: f32,
     composited: bool,
+    want_buddy: bool,
 ) -> anyhow::Result<Surface> {
     let visual = if composited {
         argb_visual(screen)
@@ -258,9 +265,15 @@ fn create_surface(
         None
     };
     let argb = visual.is_some();
+    // The buddy needs real transparency; without a compositor use the pill.
+    let buddy = want_buddy && argb;
     let pad = if argb { SHADOW } else { 0.0 };
-    let w = ((PILL_W + 2.0 * pad) * scale).round() as u16;
-    let h = ((PILL_H + 2.0 * pad) * scale).round() as u16;
+    let (w, h) = if buddy {
+        (buddy::WIDTH * scale, buddy::HEIGHT * scale)
+    } else {
+        ((PILL_W + 2.0 * pad) * scale, (PILL_H + 2.0 * pad) * scale)
+    };
+    let (w, h) = (w.round() as u16, h.round() as u16);
 
     let win = conn.generate_id()?;
     let (depth, visual_id, colormap) = match visual {
@@ -360,6 +373,7 @@ fn create_surface(
         gc,
         depth,
         argb,
+        buddy,
         w,
         h,
         mapped: false,
@@ -369,9 +383,15 @@ fn create_surface(
 fn place(conn: &RustConnection, screen: &Screen, s: &Surface, scale: f32, pos: OverlayPosition) {
     let (mx, my, mw, mh) = pointer_monitor(conn, screen);
     let x = mx + (mw - s.w as i32) / 2;
+    // The buddy's window has room for rings around it, so it sits closer.
+    let edge = if s.buddy {
+        MARGIN_EDGE * 0.55
+    } else {
+        MARGIN_EDGE
+    };
     let y = match pos {
-        OverlayPosition::Bottom => my + mh - s.h as i32 - (MARGIN_EDGE * scale) as i32,
-        OverlayPosition::Top => my + (MARGIN_EDGE * 0.6 * scale) as i32,
+        OverlayPosition::Bottom => my + mh - s.h as i32 - (edge * scale) as i32,
+        OverlayPosition::Top => my + (edge * 0.6 * scale) as i32,
     };
     let _ = conn.configure_window(
         s.win,
@@ -421,6 +441,7 @@ fn present(conn: &RustConnection, s: &Surface, pm: &Pixmap, msb_first: bool) -> 
 struct Snapshot {
     enabled: bool,
     position: OverlayPosition,
+    style: OverlayStyle,
     visible: bool,
     phase: Phase,
     label: String,
@@ -443,13 +464,17 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
     let mut last = Instant::now();
     let started = Instant::now();
     let mut icon_cache: Option<(IconState, u32, Pixmap)> = None;
+    let mut anim = buddy::Anim::default();
+    let fonts = Fonts {
+        regular: &regular,
+        semibold: &semibold,
+    };
 
     loop {
-        let animating = surface.as_ref().map(|s| s.mapped).unwrap_or(false);
-        let timeout = if animating {
-            Duration::from_millis(33)
-        } else {
-            Duration::from_millis(400)
+        let timeout = match surface.as_ref() {
+            Some(s) if s.mapped && s.buddy => Duration::from_millis(20),
+            Some(s) if s.mapped => Duration::from_millis(33),
+            _ => Duration::from_millis(400),
         };
         match wake.recv_timeout(timeout) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -468,6 +493,7 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
             Snapshot {
                 enabled: m.enabled,
                 position: m.position,
+                style: m.style,
                 visible: m.visible,
                 phase: m.phase,
                 label: m.label.clone(),
@@ -489,7 +515,9 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
                     &screen,
                     scale,
                     has_compositor(&conn, screen_num),
+                    snap.style == OverlayStyle::Buddy,
                 )?);
+                anim.reset();
             }
             if let Some(s) = surface.as_mut() {
                 place(&conn, &screen, s, scale, snap.position);
@@ -503,10 +531,11 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
         }
 
         if s.argb {
+            let out = if s.buddy { 0.24 } else { 0.18 };
             fade = if want {
                 (fade + dt / 0.12).min(1.0)
             } else {
-                (fade - dt / 0.18).max(0.0)
+                (fade - dt / out).max(0.0)
             };
         } else {
             fade = if want { 1.0 } else { 0.0 };
@@ -531,6 +560,19 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
 
         let mut pm =
             Pixmap::new(s.w as u32, s.h as u32).ok_or_else(|| anyhow::anyhow!("overlay pixmap"))?;
+        if s.buddy {
+            let frame = buddy::Frame {
+                phase: snap.phase,
+                label: &snap.label,
+                text: &snap.text,
+                level: smooth_level,
+            };
+            anim.step(dt, &frame, &fonts);
+            buddy::draw(&mut pm, &fonts, &anim, &frame, scale, fade, !want);
+            present(&conn, s, &pm, msb_first)?;
+            conn.flush()?;
+            continue;
+        }
         let state = match snap.phase {
             Phase::Listening => IconState::Listening,
             Phase::Connecting | Phase::Finishing => IconState::Busy,
@@ -545,10 +587,7 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
         let icon_pm = &icon_cache.as_ref().expect("icon cache").2;
         draw(
             &mut pm,
-            &Fonts {
-                regular: &regular,
-                semibold: &semibold,
-            },
+            &fonts,
             &snap,
             icon_pm,
             DrawParams {
@@ -583,11 +622,11 @@ struct DrawParams {
     shadow: bool,
 }
 
-fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color {
+pub(crate) fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color {
     Color::from_rgba8(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
-fn solid(c: Color) -> Paint<'static> {
+pub(crate) fn solid(c: Color) -> Paint<'static> {
     let mut p = Paint::default();
     p.set_color(c);
     p.anti_alias = true;
@@ -595,7 +634,7 @@ fn solid(c: Color) -> Paint<'static> {
 }
 
 /// A capsule (fully rounded ends) at (x, y) of size w×h.
-fn pill(x: f32, y: f32, w: f32, h: f32) -> Option<tiny_skia::Path> {
+pub(crate) fn pill(x: f32, y: f32, w: f32, h: f32) -> Option<tiny_skia::Path> {
     Rect::from_xywh(x, y, w, h)?;
     let r = (h / 2.0).min(w / 2.0);
     let k = 0.5523 * r; // cubic approximation of a quarter circle
@@ -613,7 +652,7 @@ fn pill(x: f32, y: f32, w: f32, h: f32) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
-fn accent(phase: Phase) -> (u8, u8, u8) {
+pub(crate) fn accent(phase: Phase) -> (u8, u8, u8) {
     match phase {
         Phase::Listening => (0xFF, 0x6B, 0x8B),
         Phase::Connecting | Phase::Finishing => (0xFB, 0xBF, 0x24),
@@ -624,7 +663,7 @@ fn accent(phase: Phase) -> (u8, u8, u8) {
 }
 
 /// Lay out `text` and return its advance width.
-fn measure(font: &FontRef, px: f32, text: &str) -> f32 {
+pub(crate) fn measure(font: &FontRef, px: f32, text: &str) -> f32 {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut w = 0.0;
     let mut prev = None;
@@ -640,7 +679,7 @@ fn measure(font: &FontRef, px: f32, text: &str) -> f32 {
 }
 
 /// Draw `text` with its baseline starting at `(x, y)`; returns the advance width.
-fn draw_text(
+pub(crate) fn draw_text(
     pm: &mut Pixmap,
     font: &FontRef,
     px: f32,
@@ -692,7 +731,7 @@ fn draw_text(
 }
 
 /// The end of `text` that fits in `max` px, prefixed with "…" when cut.
-fn tail_fit(font: &FontRef, px: f32, text: &str, max: f32) -> String {
+pub(crate) fn tail_fit(font: &FontRef, px: f32, text: &str, max: f32) -> String {
     if measure(font, px, text) <= max {
         return text.to_string();
     }
@@ -711,7 +750,7 @@ fn tail_fit(font: &FontRef, px: f32, text: &str, max: f32) -> String {
 }
 
 /// The start of `text` that fits in `max` px, suffixed with "…" when cut.
-fn head_fit(font: &FontRef, px: f32, text: &str, max: f32) -> String {
+pub(crate) fn head_fit(font: &FontRef, px: f32, text: &str, max: f32) -> String {
     if measure(font, px, text) <= max {
         return text.to_string();
     }
@@ -945,6 +984,7 @@ pub fn preview(
         &Snapshot {
             enabled: true,
             position: OverlayPosition::Bottom,
+            style: OverlayStyle::Pill,
             visible: true,
             phase,
             label: label.to_string(),

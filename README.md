@@ -10,12 +10,13 @@
 
 Hold **F12**, speak, and the text is typed straight into **whatever window is
 focused** — browser, editor, terminal, chat, anywhere. Release to finish.
-Lalia lives in your **system tray**, shows a small **on-screen indicator** with a
-live level meter and the words it hears, and has a **settings window** with a
-guided first-run setup.
+Lalia lives in your **system tray**, and while you talk **Lali** — a tiny
+animated buddy — bobs along to your voice and shows the words it hears. There's a
+**settings window** with a guided first-run setup.
+
+<p align="center"><img src="docs/lali.gif" width="470" alt="Lali reacting while you dictate"></p>
 
 ![Lalia settings window](docs/settings.png)
-![The on-screen indicator while dictating](docs/overlay.png)
 
 It runs on **Gemini 3.5 Transcribe Live** — the exact model and technique
 Antigravity's record button uses (the Live API's `BidiGenerateContent` +
@@ -63,7 +64,7 @@ The free tier covers this model at **$0**.
 | Feature | How |
 |---|---|
 | **Tray icon** | Colour shows the state (ready, listening, paused, needs setup). Left-click: settings. Middle-click: pause. Menu: mode, typing, hotkey style, recent dictations, start on login |
-| **On-screen indicator** | A pill at the bottom (or top) of the screen with a level meter and live text. Click-through, never steals focus |
+| **Lali, the dictation buddy** | A small animated character that listens, mouths along, ripples with your voice, thinks, celebrates and naps (paused). Your words unroll in a speech bubble. Click-through, never steals focus. Prefer something quieter? `overlay_style = "pill"` |
 | **Settings window** | Guided setup, all options, searchable history, light and dark themes |
 | **Push-to-talk or toggle** | `activation = "hold"` (default) or `"toggle"` — tap to start/stop |
 | **Pause everything** | Tap **F11** to pause/resume; F12 is inert while paused |
@@ -113,6 +114,7 @@ input_device = ""        # microphone name, empty = system default
 type_delay_ms = 2        # raise to 4-6 if an app drops characters
 overlay = true           # on-screen indicator while dictating
 overlay_position = "bottom"
+overlay_style = "buddy"  # "buddy" (Lali, needs desktop effects) | "pill"
 notify = true
 sound = true
 history = true           # keep a local history (~/.local/share/lalia)
@@ -163,7 +165,8 @@ src/audio.rs      mic capture (cpal) → downmix + resample → 16 kHz mono PCM1
 src/gemini.rs     Live API WebSocket: setup, stream audio, parse interim/final, key check
 src/inject.rs     ordered typing queue (xdotool) + segment spacing
 src/tray.rs       system-tray icon and menu (StatusNotifierItem)
-src/overlay.rs    on-screen indicator (raw X11 window, tiny-skia drawing)
+src/overlay.rs    on-screen indicator window (raw X11, click-through) + the pill style
+src/buddy.rs      Lali, the animated buddy (tiny-skia drawing + animation state)
 src/gui.rs        settings window (egui): setup, settings, history, about
 src/icon.rs       the λ icon, drawn in code for every size and state
 src/history.rs    local dictation history (JSON lines)

@@ -231,7 +231,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             let _ = tx.send(AppEvent::InjectError(e));
         })
     };
-    let overlay = Overlay::start(cfg.overlay, cfg.overlay_position);
+    let overlay = Overlay::start(cfg.overlay, cfg.overlay_position, cfg.overlay_style);
     let _ = history::trim();
     let recent = history::load()
         .into_iter()
@@ -703,8 +703,11 @@ impl App {
                 if keys_changed {
                     self.apply_hotkeys();
                 }
-                self.overlay
-                    .configure(self.cfg.overlay, self.cfg.overlay_position);
+                self.overlay.configure(
+                    self.cfg.overlay,
+                    self.cfg.overlay_position,
+                    self.cfg.overlay_style,
+                );
                 if !had_key && self.cfg.has_key() {
                     self.last_error = None;
                     eprintln!("[lalia] API key added — ready");

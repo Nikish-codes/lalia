@@ -19,7 +19,7 @@ use eframe::egui::{
 use egui_phosphor::regular as ph;
 
 use crate::app::{DaemonStatus, Phase};
-use crate::config::{self, Activation, Config, InsertMode, Mode, OverlayPosition};
+use crate::config::{self, Activation, Config, InsertMode, Mode, OverlayPosition, OverlayStyle};
 use crate::icon::{self, IconState};
 use crate::{audio, autostart, gemini, history, hotkey, ipc, overlay};
 
@@ -1874,6 +1874,21 @@ impl SettingsApp {
                         ],
                     );
                 });
+                divider(ui, p);
+                row(
+                    ui,
+                    p,
+                    "Style",
+                    "Lali is a little animated buddy that reacts to your voice; the pill is quieter. Lali needs desktop effects (a compositor), otherwise the pill is used.",
+                    |ui| {
+                        segmented(
+                            ui,
+                            p,
+                            &mut self.cfg.overlay_style,
+                            &[(OverlayStyle::Buddy, "Lali"), (OverlayStyle::Pill, "Pill")],
+                        );
+                    },
+                );
             }
         });
         ui.add_space(12.0);

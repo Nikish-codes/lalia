@@ -33,6 +33,15 @@ pub enum OverlayPosition {
     Top,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayStyle {
+    /// Lali, the animated buddy (needs a compositing desktop; falls back to Pill).
+    Buddy,
+    /// The compact pill with a level meter.
+    Pill,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Verbatim,
@@ -84,6 +93,8 @@ pub struct FileConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay_position: Option<OverlayPosition>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay_style: Option<OverlayStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sound: Option<bool>,
@@ -110,6 +121,7 @@ pub struct Config {
     /// Floating on-screen indicator while dictating.
     pub overlay: bool,
     pub overlay_position: OverlayPosition,
+    pub overlay_style: OverlayStyle,
     pub notify: bool,
     pub sound: bool,
     /// Keep a local history of dictations.
@@ -298,6 +310,15 @@ impl Config {
             .or(file.overlay_position)
             .unwrap_or(OverlayPosition::Bottom);
 
+        let overlay_style = env("LALIA_OVERLAY_STYLE")
+            .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+                "buddy" => Some(OverlayStyle::Buddy),
+                "pill" => Some(OverlayStyle::Pill),
+                _ => None,
+            })
+            .or(file.overlay_style)
+            .unwrap_or(OverlayStyle::Buddy);
+
         let flag = |var: &str, file_value: Option<bool>, default: bool| {
             env(var)
                 .map(|v| parse_bool(&v))
@@ -343,6 +364,7 @@ impl Config {
                 .unwrap_or(2),
             overlay: flag("LALIA_OVERLAY", file.overlay, true),
             overlay_position,
+            overlay_style,
             notify: flag("LALIA_NOTIFY", file.notify, true),
             sound: flag("LALIA_SOUND", file.sound, true),
             history: flag("LALIA_HISTORY", file.history, true),
@@ -365,6 +387,7 @@ impl Config {
             type_delay_ms: Some(self.type_delay_ms),
             overlay: Some(self.overlay),
             overlay_position: Some(self.overlay_position),
+            overlay_style: Some(self.overlay_style),
             notify: Some(self.notify),
             sound: Some(self.sound),
             history: Some(self.history),
@@ -414,7 +437,7 @@ impl Config {
                 &self.input_device
             },
             if self.overlay {
-                format!("{:?}", self.overlay_position).to_lowercase()
+                format!("{:?}, {:?}", self.overlay_style, self.overlay_position).to_lowercase()
             } else {
                 "off".to_string()
             },
@@ -477,6 +500,7 @@ type_delay_ms = 2
 # Floating indicator with a level meter and live text while you dictate.
 overlay = true
 overlay_position = "bottom"   # "bottom" | "top"
+overlay_style = "buddy"       # "buddy" (animated character) | "pill"
 
 # Desktop notifications (errors, pause when the overlay is off) and sounds.
 notify = true
@@ -520,6 +544,7 @@ mod tests {
         let file: FileConfig = toml::from_str(DEFAULT_CONFIG).unwrap();
         let c = Config::resolve(file, &env_of(&[]));
         assert_eq!(c.overlay_position, OverlayPosition::Bottom);
+        assert_eq!(c.overlay_style, OverlayStyle::Buddy);
         assert!(c.language_codes.is_empty());
         assert_eq!(c.type_delay_ms, 2);
     }
@@ -565,7 +590,10 @@ mod tests {
     #[test]
     fn round_trips_through_toml() {
         let c = Config::resolve(
-            toml::from_str("mode = \"SMART\"\noverlay_position = \"top\"").unwrap(),
+            toml::from_str(
+                "mode = \"SMART\"\noverlay_position = \"top\"\noverlay_style = \"pill\"",
+            )
+            .unwrap(),
             &env_of(&[]),
         );
         let text = toml::to_string_pretty(&c.to_file()).unwrap();
