@@ -5,7 +5,8 @@
 ;   "Installed apps", and optionally start-on-login and a desktop shortcut.
 ;
 ; Build (from this folder):
-;   makensis -DVERSION=0.4.0 -DEXE=../../target/release/lalia.exe installer.nsi
+;   makensis -DVERSION=0.4.0 installer.nsi
+; Paths are relative to this file, so it can be run from anywhere.
 
 Unicode true
 !include "MUI2.nsh"
@@ -14,8 +15,10 @@ Unicode true
 !ifndef VERSION
   !define VERSION "0.0.0"
 !endif
+; The repository root, wherever makensis was started from.
+!define ROOT "${__FILEDIR__}/../.."
 !ifndef EXE
-  !define EXE "../../target/release/lalia.exe"
+  !define EXE "${ROOT}/target/release/lalia.exe"
 !endif
 !ifndef OUTFILE
   !define OUTFILE "lalia-${VERSION}-windows-x64-setup.exe"
@@ -40,8 +43,8 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "MIT License"
 
-!define MUI_ICON "lalia.ico"
-!define MUI_UNICON "lalia.ico"
+!define MUI_ICON "${__FILEDIR__}/lalia.ico"
+!define MUI_UNICON "${__FILEDIR__}/lalia.ico"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "Welcome to Lalia"
 !define MUI_WELCOMEPAGE_TEXT "Lalia types what you say into any app: hold F12, speak, let go.$\r$\n$\r$\nIt lives in the notification area next to the clock. The first time it starts, a short setup asks for your Gemini API key and checks your microphone.$\r$\n$\r$\nThis installs Lalia for you only; no administrator rights are needed."
@@ -71,9 +74,9 @@ Section "Lalia" SecMain
   !insertmacro StopLalia
   SetOutPath "$INSTDIR"
   File "/oname=lalia.exe" "${EXE}"
-  File "/oname=README.md" "../../README.md"
-  File "/oname=LICENSE.txt" "../../LICENSE"
-  File "/oname=Inter-LICENSE.txt" "../../assets/fonts/Inter-LICENSE.txt"
+  File "/oname=README.md" "${ROOT}/README.md"
+  File "/oname=LICENSE.txt" "${ROOT}/LICENSE"
+  File "/oname=Inter-LICENSE.txt" "${ROOT}/assets/fonts/Inter-LICENSE.txt"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortcut "$SMPROGRAMS\Lalia.lnk" "$INSTDIR\lalia.exe"

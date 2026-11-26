@@ -148,6 +148,8 @@ fn cmd_config() -> anyhow::Result<()> {
     println!("  config file : {}", config::config_path().display());
     println!("  config dir  : {}", config::config_dir().display());
     println!("  history     : {}", history::path().display());
+    #[cfg(windows)]
+    println!("  log         : {}", win::log_path().display());
     println!(
         "  key present : {}",
         if cfg.has_key() { "yes" } else { "no" }

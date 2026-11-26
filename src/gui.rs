@@ -2131,6 +2131,8 @@ impl SettingsApp {
                 ("Settings", config::config_path()),
                 ("API key", config::key_path()),
                 ("History", history::path()),
+                #[cfg(windows)]
+                ("Log", crate::win::log_path()),
             ] {
                 row(ui, p, label, &path.display().to_string(), |ui| {
                     if link(ui, p, &format!("{} Open folder", ph::FOLDER_OPEN)).clicked() {

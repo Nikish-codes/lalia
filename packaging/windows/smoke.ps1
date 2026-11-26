@@ -21,6 +21,8 @@ public static class Native {
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam);
 }
 "@
 [Native]::SetProcessDPIAware() | Out-Null
@@ -46,7 +48,9 @@ function Check($what, $ok) {
     else { Write-Host "FAIL  $what"; $script:failures += $what }
 }
 
-$VK_F11 = 0x7A; $VK_F12 = 0x7B
+$VK_F11 = 0x7A; $VK_F12 = 0x7B; $VK_CONTROL = 0x11; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D
+$VK_LWIN = 0x5B; $VK_B = 0x42
+$WM_TRAY = 0x8001; $WM_LBUTTONUP = 0x0202; $WM_RBUTTONUP = 0x0205
 
 # --- CLI ---------------------------------------------------------------
 $version = Lalia version
@@ -58,8 +62,16 @@ Check "set-key stores the key" (Test-Path "$env:APPDATA\lalia\key")
 Check "status fails cleanly when not running" (-not (Lalia status))
 
 # --- daemon ------------------------------------------------------------
-Start-Process $Exe
-Start-Sleep 6
+# Launch it the way the Start menu does (through Explorer, with no terminal).
+$viaExplorer = $true
+Start-Process explorer.exe -ArgumentList "`"$Exe`""
+Start-Sleep 8
+if (-not (Lalia status)) {
+    Write-Host "WARN  launching through Explorer did not work here; starting directly"
+    $viaExplorer = $false
+    Start-Process $Exe
+    Start-Sleep 6
+}
 $s = Status
 Check "daemon answers on the named pipe (phase $($s.phase))" ($s.phase -eq "idle")
 Shot "1-running"
@@ -97,8 +109,29 @@ Check "F12 reaches the daemon (hook) and ends in a clear state" `
     (($during.phase -ne "idle") -or $during.error -or $after.error)
 Check "daemon is idle again after the attempt" ($after.phase -eq "idle")
 
+# --- tray icon -------------------------------------------------------------
+$tray = [Native]::FindWindowW("LaliaTray", $null)
+Check "tray window exists" ($tray -ne [IntPtr]::Zero)
+try {
+    # Win+B focuses the notification area's overflow arrow; Enter opens it.
+    [Native]::keybd_event($VK_LWIN, 0, 0, [UIntPtr]::Zero); Key $VK_B 60
+    [Native]::keybd_event($VK_LWIN, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 800; Key $VK_RETURN 60; Start-Sleep 2
+    Shot "3b-tray-overflow"
+    Key $VK_ESCAPE 60; Start-Sleep 1
+    # A right-click on the icon, as the shell reports it: the menu opens.
+    [Native]::PostMessageW($tray, $WM_TRAY, [UIntPtr]::Zero, [IntPtr]$WM_RBUTTONUP) | Out-Null
+    Start-Sleep 2
+    Shot "3c-tray-menu"
+    Key $VK_ESCAPE 60; Start-Sleep 1
+    Check "daemon still answers after the tray menu" ((Status).phase -eq "idle")
+} catch {
+    Write-Host "WARN  tray screenshots could not be taken: $_"
+}
+
 # --- settings window -----------------------------------------------------
-Start-Process $Exe -ArgumentList "gui", "home"
+# A left-click on the tray icon opens it.
+[Native]::PostMessageW($tray, $WM_TRAY, [UIntPtr]::Zero, [IntPtr]$WM_LBUTTONUP) | Out-Null
 Start-Sleep 10
 Shot "4-settings-home"
 $gui = Get-Process lalia | Where-Object { $_.MainWindowTitle -eq "Lalia" }
@@ -121,7 +154,12 @@ try {
     Start-Sleep 1
     Shot "6-typed-in-notepad"
     Set-Clipboard -Value "empty"
-    [System.Windows.Forms.SendKeys]::SendWait("^a^c")
+    foreach ($letter in 0x41, 0x43) {          # Ctrl+A, Ctrl+C
+        [Native]::keybd_event($VK_CONTROL, 0, 0, [UIntPtr]::Zero)
+        Key $letter 60
+        [Native]::keybd_event($VK_CONTROL, 0, 2, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 300
+    }
     Start-Sleep 1
     $typed = (Get-Clipboard -Raw)
     if ($typed) { $typed = $typed.Trim() }
@@ -131,6 +169,13 @@ try {
 } catch {
     Write-Host "WARN  typing test could not run: $_"
 }
+
+# --- log file --------------------------------------------------------------
+$log = "$env:LOCALAPPDATA\lalia\lalia.log"
+if ($viaExplorer) {
+    Check "started without a terminal, the daemon writes a log file" ((Test-Path $log) -and ((Get-Content $log -Raw) -match "lalia \d"))
+}
+if (Test-Path $log) { Write-Host "      --- lalia.log ---"; Get-Content $log -Tail 12 | ForEach-Object { Write-Host "      $_" } }
 
 # --- quit ----------------------------------------------------------------
 $bye = Lalia quit
