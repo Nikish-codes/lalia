@@ -50,7 +50,7 @@ jobs:
         run: |
           title="$(grep -m1 "^## ${GITHUB_REF_NAME#v}" CHANGELOG.md | sed -E 's/^## //')"
           gh release create "$GITHUB_REF_NAME" \
-            --title "Lalia ${title:-$GITHUB_REF_NAME}" \
+            --title "Lalia v${title:-${GITHUB_REF_NAME#v}}" \
             --notes-file notes.md \
             artifacts/lalia-deb/*.deb \
             artifacts/lalia-windows/*-setup.exe \

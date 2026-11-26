@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — Lalia for Windows
+## 0.4.0 — now on Windows
 
 Lalia now runs on **Windows 10 and 11** with everything the Linux version has.
 
