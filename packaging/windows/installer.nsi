@@ -15,8 +15,11 @@ Unicode true
 !ifndef VERSION
   !define VERSION "0.0.0"
 !endif
-; The repository root, wherever makensis was started from.
-!define ROOT "${__FILEDIR__}/../.."
+; The repository root. build.ps1 passes it as an absolute path (NSIS on
+; Windows does not resolve ".." in these); the default works on Linux.
+!ifndef ROOT
+  !define ROOT "${__FILEDIR__}/../.."
+!endif
 !ifndef EXE
   !define EXE "${ROOT}/target/release/lalia.exe"
 !endif

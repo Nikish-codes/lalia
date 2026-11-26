@@ -24,7 +24,7 @@ if (-not (Test-Path $makensis)) {
 
 Write-Host "==> Building the installer (lalia $version)"
 $setup = Join-Path $root "dist\lalia-$version-windows-x64-setup.exe"
-& $makensis /V2 "/DVERSION=$version" "/DEXE=$exe" "/DOUTFILE=$setup" (Join-Path $root "packaging\windows\installer.nsi")
+& $makensis /V2 "/DVERSION=$version" "/DROOT=$root" "/DEXE=$exe" "/DOUTFILE=$setup" (Join-Path $root "packaging\windows\installer.nsi")
 if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
 
 Write-Host "==> Building the portable zip"
