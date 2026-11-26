@@ -16,12 +16,13 @@ Unicode true
   !define VERSION "0.0.0"
 !endif
 ; The repository root. build.ps1 passes it as an absolute path (NSIS on
-; Windows does not resolve ".." in these); the default works on Linux.
+; Windows does not resolve ".." in these). Backslashes work on both Windows
+; and Linux makensis; forward slashes do not work on Windows.
 !ifndef ROOT
-  !define ROOT "${__FILEDIR__}/../.."
+  !define ROOT "${__FILEDIR__}\..\.."
 !endif
 !ifndef EXE
-  !define EXE "${ROOT}/target/release/lalia.exe"
+  !define EXE "${ROOT}\target\release\lalia.exe"
 !endif
 !ifndef OUTFILE
   !define OUTFILE "lalia-${VERSION}-windows-x64-setup.exe"
@@ -46,8 +47,8 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "MIT License"
 
-!define MUI_ICON "${__FILEDIR__}/lalia.ico"
-!define MUI_UNICON "${__FILEDIR__}/lalia.ico"
+!define MUI_ICON "${__FILEDIR__}\lalia.ico"
+!define MUI_UNICON "${__FILEDIR__}\lalia.ico"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "Welcome to Lalia"
 !define MUI_WELCOMEPAGE_TEXT "Lalia types what you say into any app: hold F12, speak, let go.$\r$\n$\r$\nIt lives in the notification area next to the clock. The first time it starts, a short setup asks for your Gemini API key and checks your microphone.$\r$\n$\r$\nThis installs Lalia for you only; no administrator rights are needed."
@@ -77,9 +78,9 @@ Section "Lalia" SecMain
   !insertmacro StopLalia
   SetOutPath "$INSTDIR"
   File "/oname=lalia.exe" "${EXE}"
-  File "/oname=README.md" "${ROOT}/README.md"
-  File "/oname=LICENSE.txt" "${ROOT}/LICENSE"
-  File "/oname=Inter-LICENSE.txt" "${ROOT}/assets/fonts/Inter-LICENSE.txt"
+  File "/oname=README.md" "${ROOT}\README.md"
+  File "/oname=LICENSE.txt" "${ROOT}\LICENSE"
+  File "/oname=Inter-LICENSE.txt" "${ROOT}\assets\fonts\Inter-LICENSE.txt"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortcut "$SMPROGRAMS\Lalia.lnk" "$INSTDIR\lalia.exe"
