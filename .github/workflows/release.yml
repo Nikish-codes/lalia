@@ -1,0 +1,57 @@
+name: Release
+
+# Push a tag like v0.4.0 to build both platforms and publish a GitHub release
+# with the .deb, the Windows installer and the portable zip attached.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The section for this version: from its "## x.y.z" heading to the next one.
+          awk -v v="$version" '
+            /^## / { if (found) exit; if (index($0, "## " v) == 1) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || echo "See CHANGELOG.md." > notes.md
+          cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="$(grep -m1 "^## ${GITHUB_REF_NAME#v}" CHANGELOG.md | sed -E 's/^## //')"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Lalia v${title:-${GITHUB_REF_NAME#v}}" \
+            --notes-file notes.md \
+            artifacts/lalia-deb/*.deb \
+            artifacts/lalia-windows/*-setup.exe \
+            artifacts/lalia-windows/*.zip

@@ -1,20 +1,23 @@
-//! Type text into whatever window currently has focus, using X11 XTEST via
-//! `xdotool` (installed by default on most X11 desktops).
+//! Type text into whatever window currently has focus.
+//!
+//! * Linux: X11 XTEST via `xdotool` (installed by default on most desktops).
+//! * Windows: `SendInput` with Unicode keystrokes, so any language works
+//!   whatever the keyboard layout.
 //!
 //! All typing goes through one worker thread, so segments are typed strictly
 //! in the order they were transcribed, and `Joiner` decides the spacing
 //! between consecutive segments.
 
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 
 /// Type `text` at the current cursor position in the focused window.
+#[cfg(unix)]
 pub fn type_text(text: &str, delay_ms: u32) -> anyhow::Result<()> {
     if text.is_empty() {
         return Ok(());
     }
-    let status = Command::new("xdotool")
+    let status = std::process::Command::new("xdotool")
         .args([
             "type",
             "--clearmodifiers",
@@ -30,6 +33,73 @@ pub fn type_text(text: &str, delay_ms: u32) -> anyhow::Result<()> {
 
     if !status.success() {
         anyhow::bail!("xdotool exited with status {status}");
+    }
+    Ok(())
+}
+
+/// Type `text` at the current cursor position in the focused window.
+#[cfg(windows)]
+pub fn type_text(text: &str, delay_ms: u32) -> anyhow::Result<()> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+        VK_RETURN, VK_TAB,
+    };
+
+    fn key(vk: u16, scan: u16, flags: u32) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    for ch in text.chars() {
+        // A press and a release per key; characters outside the Basic
+        // Multilingual Plane (emoji) are two UTF-16 units, sent together.
+        let mut events: Vec<INPUT> = Vec::with_capacity(4);
+        match ch {
+            '\r' => continue,
+            '\n' => {
+                events.push(key(VK_RETURN, 0, 0));
+                events.push(key(VK_RETURN, 0, KEYEVENTF_KEYUP));
+            }
+            '\t' => {
+                events.push(key(VK_TAB, 0, 0));
+                events.push(key(VK_TAB, 0, KEYEVENTF_KEYUP));
+            }
+            _ => {
+                let mut units = [0u16; 2];
+                let units = ch.encode_utf16(&mut units);
+                for unit in units.iter() {
+                    events.push(key(0, *unit, KEYEVENTF_UNICODE));
+                }
+                for unit in units.iter() {
+                    events.push(key(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+                }
+            }
+        }
+        let sent = unsafe {
+            SendInput(
+                events.len() as u32,
+                events.as_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+        if sent == 0 {
+            anyhow::bail!(
+                "Windows blocked the typing (apps running as administrator do not accept it)"
+            );
+        }
+        if delay_ms > 0 {
+            thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+        }
     }
     Ok(())
 }

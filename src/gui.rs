@@ -6,7 +6,6 @@
 //! daemon's control socket.
 
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,7 +28,7 @@ use crate::{audio, autostart, gemini, history, hotkey, ipc, overlay};
 
 /// Open the settings window on `page`, or raise it if it is already open.
 pub fn open(page: &str) {
-    if ipc::request(&ipc::gui_socket(), &format!("show {page}")).is_ok() {
+    if ipc::request(ipc::Endpoint::Gui, &format!("show {page}")).is_ok() {
         return;
     }
     // After a package upgrade our own executable may be gone; fall back to
@@ -47,16 +46,26 @@ pub fn open(page: &str) {
     eprintln!("[lalia] cannot open the settings window");
 }
 
-/// Start `exe args…` in its own process group and reap it when it exits.
+/// Start `exe args…` detached from this process and reap it when it exits.
 fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> bool {
-    use std::os::unix::process::CommandExt;
-    match std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .process_group(0)
-        .spawn()
+        .stdout(Stdio::null());
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    match command.spawn() {
         Ok(mut child) => {
             thread::spawn(move || {
                 let _ = child.wait();
@@ -67,11 +76,23 @@ fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> bool {
     }
 }
 
+/// Open a folder in the desktop's file manager.
+fn open_folder(dir: std::path::PathBuf) {
+    thread::spawn(move || {
+        let opener = if cfg!(windows) {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        let _ = std::process::Command::new(opener).arg(dir).status();
+    });
+}
+
 /// Run the settings window (blocks until it is closed).
 pub fn run(page: &str) -> anyhow::Result<()> {
     let start = Page::from_slug(page).unwrap_or(Page::Home);
-    let Some(listener) = ipc::claim(&ipc::gui_socket())? else {
-        ipc::request(&ipc::gui_socket(), &format!("show {}", start.slug()))?;
+    let Some(server) = ipc::claim(ipc::Endpoint::Gui)? else {
+        ipc::request(ipc::Endpoint::Gui, &format!("show {}", start.slug()))?;
         return Ok(());
     };
 
@@ -92,9 +113,9 @@ pub fn run(page: &str) -> anyhow::Result<()> {
     let result = eframe::run_native(
         "Lalia",
         options,
-        Box::new(move |cc| Ok(Box::new(SettingsApp::new(cc, start, listener)))),
+        Box::new(move |cc| Ok(Box::new(SettingsApp::new(cc, start, server)))),
     );
-    let _ = std::fs::remove_file(ipc::gui_socket());
+    ipc::release(ipc::Endpoint::Gui);
     result.map_err(|e| anyhow::anyhow!("cannot open the settings window: {e}"))
 }
 
@@ -680,11 +701,7 @@ struct SettingsApp {
 }
 
 impl SettingsApp {
-    fn new(
-        cc: &eframe::CreationContext<'_>,
-        page: Page,
-        listener: std::os::unix::net::UnixListener,
-    ) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, page: Page, server: ipc::Server) -> Self {
         install_fonts(&cc.egui_ctx);
         install_style(&cc.egui_ctx);
 
@@ -692,20 +709,17 @@ impl SettingsApp {
         {
             let requested = requested.clone();
             let ctx = cc.egui_ctx.clone();
-            thread::spawn(move || {
-                for stream in listener.incoming().flatten() {
-                    if let Some(line) = ipc::read_command(&stream) {
-                        let page = line
-                            .strip_prefix("show")
-                            .and_then(Page::from_slug)
-                            .unwrap_or(Page::Home);
-                        if let Ok(mut r) = requested.lock() {
-                            *r = Some(page);
-                        }
-                        let _ = (&stream).write_all(b"ok\n");
-                        ctx.request_repaint();
-                    }
+            // Another "open settings" request: switch page and come forward.
+            server.serve(move |line| {
+                let page = line
+                    .strip_prefix("show")
+                    .and_then(Page::from_slug)
+                    .unwrap_or(Page::Home);
+                if let Ok(mut r) = requested.lock() {
+                    *r = Some(page);
                 }
+                ctx.request_repaint();
+                "ok".into()
             });
         }
 
@@ -1328,7 +1342,10 @@ impl SettingsApp {
             ui.add(
                 egui::Label::new(
                     RichText::new(
-                        "Lalia uses Google's Gemini live transcription. Paste a free API key — it's stored only on this computer (~/.config/lalia/key).",
+                        format!(
+                            "Lalia uses Google's Gemini live transcription. Paste a free API key — it's stored only on this computer ({}).",
+                            config::key_path().display()
+                        ),
                     )
                     .size(13.0)
                     .color(p.weak),
@@ -1585,7 +1602,7 @@ impl SettingsApp {
         row(ui, p, "Pause key", "Turns dictation off and on.", |ui| {
             key_combo(ui, "pause_hotkey", &mut self.cfg.pause_hotkey);
         });
-        if hotkey::keysyms(&self.cfg.hotkey) == hotkey::keysyms(&self.cfg.pause_hotkey) {
+        if hotkey::parse(&self.cfg.hotkey) == hotkey::parse(&self.cfg.pause_hotkey) {
             ui.label(
                 RichText::new("Use two different keys for dictate and pause.")
                     .size(12.5)
@@ -1879,7 +1896,11 @@ impl SettingsApp {
                     ui,
                     p,
                     "Style",
-                    "Lali is a little animated buddy that reacts to your voice; the pill is quieter. Lali needs desktop effects (a compositor), otherwise the pill is used.",
+                    if cfg!(windows) {
+                        "Lali is a little animated buddy that reacts to your voice; the pill is quieter."
+                    } else {
+                        "Lali is a little animated buddy that reacts to your voice; the pill is quieter. Lali needs desktop effects (a compositor), otherwise the pill is used."
+                    },
                     |ui| {
                         segmented(
                             ui,
@@ -2110,15 +2131,14 @@ impl SettingsApp {
                 ("Settings", config::config_path()),
                 ("API key", config::key_path()),
                 ("History", history::path()),
+                #[cfg(windows)]
+                ("Log", crate::win::log_path()),
             ] {
                 row(ui, p, label, &path.display().to_string(), |ui| {
                     if link(ui, p, &format!("{} Open folder", ph::FOLDER_OPEN)).clicked() {
                         if let Some(dir) = path.parent() {
                             let _ = std::fs::create_dir_all(dir);
-                            let dir = dir.to_path_buf();
-                            thread::spawn(move || {
-                                let _ = std::process::Command::new("xdg-open").arg(dir).status();
-                            });
+                            open_folder(dir.to_path_buf());
                         }
                     }
                 });
@@ -2155,7 +2175,7 @@ fn key_combo(ui: &mut Ui, id: &str, value: &mut String) {
         .height(320.0)
         .show_ui(ui, |ui| {
             for (name, label) in hotkey::CHOICES {
-                let sel = hotkey::keysyms(value) == hotkey::keysyms(name);
+                let sel = hotkey::parse(value) == hotkey::parse(name);
                 if ui.selectable_label(sel, *label).clicked() && !sel {
                     *value = name.to_string();
                 }
@@ -2221,7 +2241,20 @@ impl eframe::App for SettingsApp {
             });
     }
 
+    // eframe's signature depends on the renderer: OpenGL on Linux, wgpu on Windows.
+    #[cfg(unix)]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_on_exit();
+    }
+
+    #[cfg(windows)]
+    fn on_exit(&mut self) {
+        self.save_on_exit();
+    }
+}
+
+impl SettingsApp {
+    fn save_on_exit(&mut self) {
         if self.cfg != self.saved {
             self.save();
         }

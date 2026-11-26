@@ -1,17 +1,25 @@
-//! System-tray icon (StatusNotifierItem over D-Bus): works in Cinnamon, KDE,
-//! XFCE, MATE and GNOME with the AppIndicator extension (Ubuntu's default).
-//!
-//! The icon changes colour with the state; left-click opens the settings
+//! System-tray icon: colour shows the state; left-click opens the settings
 //! window, middle-click pauses/resumes, and the menu holds the quick toggles.
+//!
+//! This file describes *what* the tray shows (state, headline, menu) so both
+//! platforms offer exactly the same thing. Showing it is platform work:
+//! StatusNotifierItem over D-Bus on Linux (`sni.rs`), a notification-area
+//! icon on Windows (`windows.rs`).
 
-use ksni::menu::{CheckmarkItem, RadioGroup, RadioItem, StandardItem, SubMenu};
-use ksni::{Icon, MenuItem, ToolTip, TrayMethods};
-use tokio::sync::mpsc::UnboundedSender;
+#[cfg(unix)]
+mod sni;
+#[cfg(windows)]
+mod windows;
 
-use crate::app::{AppEvent, Command, Phase};
+#[cfg(unix)]
+pub use sni::{remove, spawn, update, Handle};
+#[cfg(windows)]
+pub use windows::{balloon, remove, spawn, update, Handle};
+
+use crate::app::{Command, Phase};
 use crate::config::{Activation, InsertMode, Mode};
 use crate::hotkey;
-use crate::icon::{self, IconState};
+use crate::icon::IconState;
 
 /// What the tray shows; the daemon pushes a fresh copy on every change.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,19 +36,41 @@ pub struct TrayState {
     pub error: Option<String>,
 }
 
-pub struct LaliaTray {
-    pub state: TrayState,
-    tx: UnboundedSender<AppEvent>,
+/// One entry of the tray menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Item {
+    /// Greyed-out text (the status line).
+    Label(String),
+    Action {
+        label: String,
+        /// Freedesktop icon name (used where the desktop shows menu icons).
+        icon: &'static str,
+        enabled: bool,
+        command: Command,
+    },
+    Check {
+        label: String,
+        checked: bool,
+        command: Command,
+    },
+    /// A submenu of mutually exclusive options.
+    Radio {
+        label: String,
+        selected: usize,
+        options: Vec<(String, Command)>,
+    },
+    Submenu {
+        label: String,
+        icon: &'static str,
+        items: Vec<Item>,
+    },
+    Separator,
 }
 
-impl LaliaTray {
-    fn send(&self, cmd: Command) {
-        let _ = self.tx.send(AppEvent::Command(cmd, None));
-    }
-
-    fn icon_state(&self) -> IconState {
-        match self.state.phase {
-            Phase::Idle if self.state.error.is_some() => IconState::Attention,
+impl TrayState {
+    pub fn icon_state(&self) -> IconState {
+        match self.phase {
+            Phase::Idle if self.error.is_some() => IconState::Attention,
             Phase::Idle => IconState::Idle,
             Phase::Listening => IconState::Listening,
             Phase::Connecting | Phase::Finishing => IconState::Busy,
@@ -49,10 +79,10 @@ impl LaliaTray {
         }
     }
 
-    fn headline(&self) -> String {
-        let key = hotkey::label(&self.state.hotkey);
-        match self.state.phase {
-            Phase::Idle => match self.state.activation {
+    pub fn headline(&self) -> String {
+        let key = hotkey::label(&self.hotkey);
+        match self.phase {
+            Phase::Idle => match self.activation {
                 Activation::Hold => format!("Ready — hold {key} to dictate"),
                 Activation::Toggle => format!("Ready — tap {key} to dictate"),
             },
@@ -61,10 +91,142 @@ impl LaliaTray {
             Phase::Finishing => "Finishing…".into(),
             Phase::Paused => format!(
                 "Paused — tap {} to resume",
-                hotkey::label(&self.state.pause_hotkey)
+                hotkey::label(&self.pause_hotkey)
             ),
             Phase::NeedsSetup => "Setup needed — add your API key".into(),
         }
+    }
+
+    /// Tooltip text: the headline, plus the last error if there is one.
+    pub fn tooltip(&self) -> String {
+        match &self.error {
+            Some(e) => format!("{}\nLast error: {e}", self.headline()),
+            None => self.headline(),
+        }
+    }
+
+    pub fn menu(&self) -> Vec<Item> {
+        let active = matches!(self.phase, Phase::Connecting | Phase::Listening);
+        let key = hotkey::label(&self.hotkey);
+        let mut items = vec![Item::Label(self.headline())];
+        if self.phase == Phase::NeedsSetup {
+            items.push(Item::Action {
+                label: "Set up Lalia…".into(),
+                icon: "dialog-password",
+                enabled: true,
+                command: Command::Settings("setup".into()),
+            });
+        } else {
+            items.push(Item::Action {
+                label: if active {
+                    "Stop dictation".into()
+                } else {
+                    "Start dictation".into()
+                },
+                icon: if active {
+                    "media-playback-stop"
+                } else {
+                    "media-record"
+                },
+                enabled: self.phase != Phase::Paused && self.phase != Phase::Finishing,
+                command: Command::Toggle,
+            });
+            items.push(Item::Check {
+                label: format!("Paused ({})", hotkey::label(&self.pause_hotkey)),
+                checked: self.phase == Phase::Paused,
+                command: Command::TogglePause,
+            });
+        }
+        items.push(Item::Separator);
+        items.push(Item::Radio {
+            label: "Mode".into(),
+            selected: (self.mode == Mode::Smart) as usize,
+            options: vec![
+                (
+                    "Verbatim — exactly what you say".into(),
+                    Command::SetMode(Mode::Verbatim),
+                ),
+                (
+                    "Smart — punctuation & clean-up".into(),
+                    Command::SetMode(Mode::Smart),
+                ),
+            ],
+        });
+        items.push(Item::Radio {
+            label: "Insert text".into(),
+            selected: (self.insert == InsertMode::OnRelease) as usize,
+            options: vec![
+                (
+                    "As I speak".into(),
+                    Command::SetInsert(InsertMode::Streaming),
+                ),
+                (
+                    "All at once when I finish".into(),
+                    Command::SetInsert(InsertMode::OnRelease),
+                ),
+            ],
+        });
+        items.push(Item::Radio {
+            label: "Hotkey".into(),
+            selected: (self.activation == Activation::Toggle) as usize,
+            options: vec![
+                (
+                    format!("Hold {key} to talk"),
+                    Command::SetActivation(Activation::Hold),
+                ),
+                (
+                    format!("Tap {key} to start / stop"),
+                    Command::SetActivation(Activation::Toggle),
+                ),
+            ],
+        });
+        items.push(Item::Check {
+            label: "On-screen indicator".into(),
+            checked: self.overlay,
+            command: Command::SetOverlay(!self.overlay),
+        });
+        items.push(Item::Separator);
+        if !self.recent.is_empty() {
+            items.push(Item::Submenu {
+                label: "Copy recent".into(),
+                icon: "document-open-recent",
+                items: self
+                    .recent
+                    .iter()
+                    .map(|text| Item::Action {
+                        label: short(text, 48),
+                        icon: "edit-copy",
+                        enabled: true,
+                        command: Command::Copy(text.clone()),
+                    })
+                    .collect(),
+            });
+        }
+        items.push(Item::Action {
+            label: "History…".into(),
+            icon: "document-open-recent",
+            enabled: true,
+            command: Command::Settings("history".into()),
+        });
+        items.push(Item::Action {
+            label: "Settings…".into(),
+            icon: "preferences-system",
+            enabled: true,
+            command: Command::Settings("home".into()),
+        });
+        items.push(Item::Check {
+            label: "Start on login".into(),
+            checked: self.autostart,
+            command: Command::SetAutostart(!self.autostart),
+        });
+        items.push(Item::Separator);
+        items.push(Item::Action {
+            label: "Quit Lalia".into(),
+            icon: "application-exit",
+            enabled: true,
+            command: Command::Quit,
+        });
+        items
     }
 }
 
@@ -78,303 +240,65 @@ fn short(text: &str, max: usize) -> String {
     }
 }
 
-impl ksni::Tray for LaliaTray {
-    fn id(&self) -> String {
-        "lalia".into()
-    }
-
-    fn title(&self) -> String {
-        "Lalia".into()
-    }
-
-    fn icon_pixmap(&self) -> Vec<Icon> {
-        let st = self.icon_state();
-        [22u32, 32, 48, 64]
-            .iter()
-            .map(|&size| {
-                let pm = icon::render(size, st);
-                Icon {
-                    width: size as i32,
-                    height: size as i32,
-                    data: icon::argb(&pm),
-                }
-            })
-            .collect()
-    }
-
-    fn tool_tip(&self) -> ToolTip {
-        let mut description = self.headline();
-        if let Some(e) = &self.state.error {
-            description.push_str(&format!("\nLast error: {e}"));
-        }
-        ToolTip {
-            title: "Lalia — live dictation".into(),
-            description,
-            ..Default::default()
-        }
-    }
-
-    fn activate(&mut self, _x: i32, _y: i32) {
-        self.send(Command::Settings("home".into()));
-    }
-
-    fn secondary_activate(&mut self, _x: i32, _y: i32) {
-        self.send(Command::TogglePause);
-    }
-
-    fn menu(&self) -> Vec<MenuItem<Self>> {
-        let st = &self.state;
-        let active = matches!(st.phase, Phase::Connecting | Phase::Listening);
-        let mut items: Vec<MenuItem<Self>> = vec![StandardItem {
-            label: self.headline(),
-            enabled: false,
-            ..Default::default()
-        }
-        .into()];
-        if st.phase == Phase::NeedsSetup {
-            items.push(
-                StandardItem {
-                    label: "Set up Lalia…".into(),
-                    icon_name: "dialog-password".into(),
-                    activate: Box::new(|t: &mut Self| t.send(Command::Settings("setup".into()))),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        } else {
-            items.push(
-                StandardItem {
-                    label: if active {
-                        "Stop dictation".into()
-                    } else {
-                        "Start dictation".into()
-                    },
-                    icon_name: if active {
-                        "media-playback-stop".into()
-                    } else {
-                        "media-record".into()
-                    },
-                    enabled: st.phase != Phase::Paused && st.phase != Phase::Finishing,
-                    activate: Box::new(|t: &mut Self| t.send(Command::Toggle)),
-                    ..Default::default()
-                }
-                .into(),
-            );
-            items.push(
-                CheckmarkItem {
-                    label: format!("Paused ({})", hotkey::label(&st.pause_hotkey)),
-                    checked: st.phase == Phase::Paused,
-                    activate: Box::new(|t: &mut Self| t.send(Command::TogglePause)),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        items.push(MenuItem::Separator);
-
-        items.push(
-            SubMenu {
-                label: "Mode".into(),
-                submenu: vec![RadioGroup {
-                    selected: (st.mode == Mode::Smart) as usize,
-                    select: Box::new(|t: &mut Self, i| {
-                        t.send(Command::SetMode(if i == 1 {
-                            Mode::Smart
-                        } else {
-                            Mode::Verbatim
-                        }))
-                    }),
-                    options: vec![
-                        RadioItem {
-                            label: "Verbatim — exactly what you say".into(),
-                            ..Default::default()
-                        },
-                        RadioItem {
-                            label: "Smart — punctuation & clean-up".into(),
-                            ..Default::default()
-                        },
-                    ],
-                }
-                .into()],
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(
-            SubMenu {
-                label: "Insert text".into(),
-                submenu: vec![RadioGroup {
-                    selected: (st.insert == InsertMode::OnRelease) as usize,
-                    select: Box::new(|t: &mut Self, i| {
-                        t.send(Command::SetInsert(if i == 1 {
-                            InsertMode::OnRelease
-                        } else {
-                            InsertMode::Streaming
-                        }))
-                    }),
-                    options: vec![
-                        RadioItem {
-                            label: "As I speak".into(),
-                            ..Default::default()
-                        },
-                        RadioItem {
-                            label: "All at once when I finish".into(),
-                            ..Default::default()
-                        },
-                    ],
-                }
-                .into()],
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(
-            SubMenu {
-                label: "Hotkey".into(),
-                submenu: vec![RadioGroup {
-                    selected: (st.activation == Activation::Toggle) as usize,
-                    select: Box::new(|t: &mut Self, i| {
-                        t.send(Command::SetActivation(if i == 1 {
-                            Activation::Toggle
-                        } else {
-                            Activation::Hold
-                        }))
-                    }),
-                    options: vec![
-                        RadioItem {
-                            label: format!("Hold {} to talk", hotkey::label(&st.hotkey)),
-                            ..Default::default()
-                        },
-                        RadioItem {
-                            label: format!("Tap {} to start / stop", hotkey::label(&st.hotkey)),
-                            ..Default::default()
-                        },
-                    ],
-                }
-                .into()],
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(
-            CheckmarkItem {
-                label: "On-screen indicator".into(),
-                checked: st.overlay,
-                activate: Box::new(|t: &mut Self| {
-                    let on = !t.state.overlay;
-                    t.send(Command::SetOverlay(on))
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(MenuItem::Separator);
-
-        if !st.recent.is_empty() {
-            let recent: Vec<MenuItem<Self>> = st
-                .recent
-                .iter()
-                .map(|text| {
-                    let full = text.clone();
-                    StandardItem {
-                        label: short(text, 48),
-                        icon_name: "edit-copy".into(),
-                        activate: Box::new(move |t: &mut Self| t.send(Command::Copy(full.clone()))),
-                        ..Default::default()
-                    }
-                    .into()
-                })
-                .collect();
-            items.push(
-                SubMenu {
-                    label: "Copy recent".into(),
-                    icon_name: "document-open-recent".into(),
-                    submenu: recent,
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        items.push(
-            StandardItem {
-                label: "History…".into(),
-                icon_name: "document-open-recent".into(),
-                activate: Box::new(|t: &mut Self| t.send(Command::Settings("history".into()))),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(
-            StandardItem {
-                label: "Settings…".into(),
-                icon_name: "preferences-system".into(),
-                activate: Box::new(|t: &mut Self| t.send(Command::Settings("home".into()))),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(
-            CheckmarkItem {
-                label: "Start on login".into(),
-                checked: st.autostart,
-                activate: Box::new(|t: &mut Self| {
-                    let on = !t.state.autostart;
-                    t.send(Command::SetAutostart(on))
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(MenuItem::Separator);
-        items.push(
-            StandardItem {
-                label: "Quit Lalia".into(),
-                icon_name: "application-exit".into(),
-                activate: Box::new(|t: &mut Self| t.send(Command::Quit)),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items
-    }
-}
-
-pub type Handle = ksni::Handle<LaliaTray>;
-
-/// Register the tray icon. Works even if the panel starts after Lalia.
-pub async fn spawn(state: TrayState, tx: UnboundedSender<AppEvent>) -> Option<Handle> {
-    let tray = LaliaTray { state, tx };
-    match tray.assume_sni_available(true).spawn().await {
-        Ok(handle) => Some(handle),
-        Err(e) => {
-            eprintln!("[lalia] tray icon unavailable: {e}");
-            None
-        }
-    }
-}
-
-/// Push a new state to the tray (no-op when unchanged).
-pub fn update(handle: &Handle, state: TrayState) {
-    let handle = handle.clone();
-    tokio::spawn(async move {
-        handle
-            .update(move |t| {
-                if t.state != state {
-                    t.state = state;
-                }
-            })
-            .await;
-    });
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn state(phase: Phase) -> TrayState {
+        TrayState {
+            phase,
+            hotkey: "F12".into(),
+            pause_hotkey: "F11".into(),
+            activation: Activation::Hold,
+            mode: Mode::Smart,
+            insert: InsertMode::Streaming,
+            overlay: true,
+            autostart: false,
+            recent: vec!["hello there".into()],
+            error: None,
+        }
+    }
+
     #[test]
     fn short_labels() {
-        assert_eq!(super::short("hello   world", 48), "hello world");
+        assert_eq!(short("hello   world", 48), "hello world");
         let long = "word ".repeat(30);
-        let s = super::short(&long, 20);
+        let s = short(&long, 20);
         assert!(s.ends_with('…'));
         assert!(s.chars().count() <= 20);
+    }
+
+    #[test]
+    fn menu_reflects_state() {
+        let menu = state(Phase::Idle).menu();
+        assert_eq!(menu[0], Item::Label("Ready — hold F12 to dictate".into()));
+        assert!(menu.iter().any(|i| matches!(
+            i,
+            Item::Radio { label, selected: 1, .. } if label == "Mode"
+        )));
+        assert!(menu.iter().any(|i| matches!(
+            i,
+            Item::Check { label, checked: true, command: Command::SetOverlay(false) }
+                if label == "On-screen indicator"
+        )));
+        assert!(menu
+            .iter()
+            .any(|i| matches!(i, Item::Submenu { label, .. } if label == "Copy recent")));
+        assert_eq!(
+            menu.last(),
+            Some(&Item::Action {
+                label: "Quit Lalia".into(),
+                icon: "application-exit",
+                enabled: true,
+                command: Command::Quit
+            })
+        );
+
+        let setup = state(Phase::NeedsSetup).menu();
+        assert!(
+            matches!(&setup[1], Item::Action { command: Command::Settings(p), .. } if p == "setup")
+        );
+        assert_eq!(state(Phase::NeedsSetup).icon_state(), IconState::Attention);
+        assert_eq!(state(Phase::Listening).icon_state(), IconState::Listening);
     }
 }

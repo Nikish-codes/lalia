@@ -157,12 +157,17 @@ impl Capturer {
     }
 }
 
+/// The human-readable name of a device.
+fn device_name(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_string())
+}
+
 /// Names of the available input devices (for the settings window).
 pub fn input_devices() -> Vec<String> {
     let host = cpal::default_host();
     let mut names: Vec<String> = host
         .input_devices()
-        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .map(|it| it.filter_map(|d| device_name(&d)).collect())
         .unwrap_or_default();
     names.dedup();
     names
@@ -172,7 +177,7 @@ fn find_device(name: &str) -> anyhow::Result<cpal::Device> {
     let host = cpal::default_host();
     if !name.trim().is_empty() {
         if let Ok(mut devices) = host.input_devices() {
-            if let Some(d) = devices.find(|d| d.name().map(|n| n == name).unwrap_or(false)) {
+            if let Some(d) = devices.find(|d| device_name(d).as_deref() == Some(name)) {
                 return Ok(d);
             }
         }
@@ -194,7 +199,7 @@ pub fn start(
     let supported = device
         .default_input_config()
         .map_err(|e| anyhow::anyhow!("cannot read microphone settings: {e}"))?;
-    let in_rate = supported.sample_rate().0 as f64;
+    let in_rate = supported.sample_rate() as f64;
     let channels = supported.channels() as usize;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -209,36 +214,21 @@ pub fn start(
     thread::spawn(move || {
         let err_fn = {
             let on_error = on_error.clone();
-            move |e: cpal::StreamError| on_error(format!("microphone error: {e}"))
+            move |e: cpal::Error| on_error(format!("microphone error: {e}"))
         };
         let cap = Capturer::new(in_rate, channels, tx, level_thread);
         let stream = match format {
             SampleFormat::F32 => {
                 let mut cap = cap;
-                device.build_input_stream(
-                    &config,
-                    move |d: &[f32], _| cap.push_f32(d),
-                    err_fn,
-                    None,
-                )
+                device.build_input_stream(config, move |d: &[f32], _| cap.push_f32(d), err_fn, None)
             }
             SampleFormat::I16 => {
                 let mut cap = cap;
-                device.build_input_stream(
-                    &config,
-                    move |d: &[i16], _| cap.push_i16(d),
-                    err_fn,
-                    None,
-                )
+                device.build_input_stream(config, move |d: &[i16], _| cap.push_i16(d), err_fn, None)
             }
             SampleFormat::U16 => {
                 let mut cap = cap;
-                device.build_input_stream(
-                    &config,
-                    move |d: &[u16], _| cap.push_u16(d),
-                    err_fn,
-                    None,
-                )
+                device.build_input_stream(config, move |d: &[u16], _| cap.push_u16(d), err_fn, None)
             }
             other => {
                 let _ = ready_tx.send(Err(format!("unsupported sample format {other:?}")));

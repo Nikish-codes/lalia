@@ -244,6 +244,7 @@ pub fn rgba(pm: &Pixmap) -> Vec<u8> {
 }
 
 /// ARGB32 in network byte order, as StatusNotifierItem wants.
+#[cfg(unix)]
 pub fn argb(pm: &Pixmap) -> Vec<u8> {
     let mut out = rgba(pm);
     for px in out.as_chunks_mut::<4>().0 {
@@ -252,12 +253,62 @@ pub fn argb(pm: &Pixmap) -> Vec<u8> {
     out
 }
 
+/// The icon as a Windows `.ico`: 16–64 px as 32-bit bitmaps (understood by
+/// every tool that reads icons) and 256 px as PNG.
+pub fn ico() -> anyhow::Result<Vec<u8>> {
+    let sizes = [16u32, 20, 24, 32, 40, 48, 64, 256];
+    let mut images: Vec<Vec<u8>> = Vec::new();
+    for &size in &sizes {
+        let pm = render(size, IconState::Idle);
+        if size == 256 {
+            images.push(pm.encode_png()?);
+            continue;
+        }
+        // BITMAPINFOHEADER (height counts the colour rows plus the mask rows),
+        // bottom-up straight-alpha BGRA, then a 1-bit mask padded to 32 bits.
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes());
+        dib.extend_from_slice(&(size as i32).to_le_bytes());
+        dib.extend_from_slice(&(size as i32 * 2).to_le_bytes());
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&32u16.to_le_bytes());
+        dib.extend_from_slice(&[0u8; 24]);
+        let rgba = rgba(&pm);
+        for row in rgba.chunks_exact(size as usize * 4).rev() {
+            for px in row.as_chunks::<4>().0 {
+                dib.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+        }
+        let mask_row = (size as usize).div_ceil(32) * 4;
+        dib.resize(dib.len() + mask_row * size as usize, 0);
+        images.push(dib);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0, 0, 1, 0]); // reserved, type 1 = icon
+    out.extend_from_slice(&(sizes.len() as u16).to_le_bytes());
+    let mut offset = 6 + 16 * sizes.len();
+    for (&size, image) in sizes.iter().zip(&images) {
+        let dim = if size >= 256 { 0 } else { size as u8 };
+        out.extend_from_slice(&[dim, dim, 0, 0]);
+        out.extend_from_slice(&1u16.to_le_bytes()); // planes
+        out.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+        out.extend_from_slice(&(image.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(offset as u32).to_le_bytes());
+        offset += image.len();
+    }
+    for image in images {
+        out.extend_from_slice(&image);
+    }
+    Ok(out)
+}
+
 /// Write PNGs of every state (used by packaging and for previews).
 pub fn export(dir: &std::path::Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     for size in [16u32, 22, 24, 32, 48, 64, 128, 256, 512] {
         render(size, IconState::Idle).save_png(dir.join(format!("lalia-{size}.png")))?;
     }
+    std::fs::write(dir.join("lalia.ico"), ico()?)?;
     for (name, st) in [
         ("idle", IconState::Idle),
         ("listening", IconState::Listening),
@@ -295,6 +346,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ico_directory_is_consistent() {
+        let ico = ico().unwrap();
+        assert_eq!(&ico[0..4], &[0, 0, 1, 0]);
+        let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
+        assert_eq!(count, 8);
+        let mut end = 6 + 16 * count;
+        for i in 0..count {
+            let e = &ico[6 + 16 * i..22 + 16 * i];
+            let len = u32::from_le_bytes(e[8..12].try_into().unwrap()) as usize;
+            let offset = u32::from_le_bytes(e[12..16].try_into().unwrap()) as usize;
+            assert_eq!(offset, end, "entry {i} follows the previous image");
+            end += len;
+        }
+        assert_eq!(end, ico.len());
+        // The last image (256 px) is a PNG.
+        let last = &ico[6 + 16 * (count - 1)..];
+        let offset = u32::from_le_bytes(last[12..16].try_into().unwrap()) as usize;
+        assert_eq!(&ico[offset..offset + 4], b"\x89PNG");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn argb_is_rotated_rgba() {
         let pm = render(16, IconState::Idle);
