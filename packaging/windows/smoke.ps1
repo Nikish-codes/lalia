@@ -110,7 +110,7 @@ Check "F12 reaches the daemon (hook) and ends in a clear state" `
 Check "daemon is idle again after the attempt" ($after.phase -eq "idle")
 
 # --- tray icon -------------------------------------------------------------
-$tray = [Native]::FindWindowW("LaliaTray", $null)
+$tray = [Native]::FindWindowW("LaliaTray", "Lalia")   # ($null would be passed as "")
 Check "tray window exists" ($tray -ne [IntPtr]::Zero)
 try {
     # Win+B focuses the notification area's overflow arrow; Enter opens it.
@@ -136,10 +136,14 @@ Start-Sleep 10
 Shot "4-settings-home"
 $gui = Get-Process lalia | Where-Object { $_.MainWindowTitle -eq "Lalia" }
 Check "settings window opens" ($null -ne $gui)
-Lalia gui dictation | Out-Null   # second request switches page in the same window
-Start-Sleep 3
-Shot "5-settings-dictation"
-Check "still one settings window" (@(Get-Process lalia | Where-Object { $_.MainWindowTitle -eq "Lalia" }).Count -eq 1)
+if ($gui) {
+    # A second request switches page in the same window (and returns at once;
+    # without a window it would open one and block, hence the guard).
+    Lalia gui dictation | Out-Null
+    Start-Sleep 3
+    Shot "5-settings-dictation"
+    Check "still one settings window" (@(Get-Process lalia | Where-Object { $_.MainWindowTitle -eq "Lalia" }).Count -eq 1)
+}
 if ($gui) { $gui | ForEach-Object { $_.CloseMainWindow() | Out-Null } }
 Start-Sleep 2
 

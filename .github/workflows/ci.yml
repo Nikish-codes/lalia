@@ -77,6 +77,7 @@ jobs:
       # Drives the real program on the runner's desktop: named pipe, keyboard
       # hook, overlay, settings window, typing into Notepad.
       - name: End-to-end smoke test
+        timeout-minutes: 6
         shell: pwsh
         run: ./packaging/windows/smoke.ps1 -Exe target\release\lalia.exe
 
