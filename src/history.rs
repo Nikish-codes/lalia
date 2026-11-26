@@ -1,5 +1,6 @@
 //! Local history of dictations, one JSON object per line in
-//! `~/.local/share/lalia/history.jsonl`. Never leaves the machine.
+//! `history.jsonl` in the data folder (`~/.local/share/lalia`, or
+//! `%LOCALAPPDATA%\lalia` on Windows). Never leaves the machine.
 
 use std::fs;
 use std::io::Write;

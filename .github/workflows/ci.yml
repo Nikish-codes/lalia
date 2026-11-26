@@ -5,10 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The release workflow runs these same jobs and publishes their artifacts.
+  workflow_call:
 
 jobs:
-  build:
-    name: Build, test & package (.deb)
+  linux:
+    name: Linux — build, test & package (.deb)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,4 +49,71 @@ jobs:
         with:
           name: lalia-deb
           path: dist/*.deb
+          if-no-files-found: error
+
+  windows:
+    name: Windows — build, test & package (installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked
+
+      # Drives the real program on the runner's desktop: named pipe, keyboard
+      # hook, overlay, settings window, typing into Notepad.
+      - name: End-to-end smoke test
+        shell: pwsh
+        run: ./packaging/windows/smoke.ps1 -Exe target\release\lalia.exe
+
+      - name: Upload smoke-test screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lalia-windows-screenshots
+          path: smoke/*.png
+          if-no-files-found: warn
+
+      - name: Build installer and portable zip
+        shell: pwsh
+        run: ./packaging/windows/build.ps1
+
+      - name: Install and uninstall silently
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist\lalia-*-windows-x64-setup.exe).FullName
+          Start-Process $setup -ArgumentList "/S" -Wait
+          $dir = "$env:LOCALAPPDATA\Programs\Lalia"
+          if (-not (Test-Path "$dir\lalia.exe")) { throw "lalia.exe was not installed" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Lalia.lnk")) { throw "no Start menu shortcut" }
+          $entry = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Lalia"
+          Write-Host "Installed apps entry: $($entry.DisplayName) $($entry.DisplayVersion)"
+          Write-Host "Installed: $((& "$dir\lalia.exe" version | Out-String).Trim())"
+          Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait
+          Start-Sleep 5
+          if (Test-Path "$dir\lalia.exe") { throw "lalia.exe is still there after uninstall" }
+          if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Lalia") { throw "uninstall entry is still there" }
+          Write-Host "Install and uninstall work."
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lalia-windows
+          path: |
+            dist/*-setup.exe
+            dist/*.zip
           if-no-files-found: error

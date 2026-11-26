@@ -1,19 +1,21 @@
-//! Global hotkey detection for X11.
+//! Global hotkeys: the dictate key and the pause key.
 //!
-//! Rather than grabbing keys (which steals them from apps), we poll the X
-//! server's keyboard bitmap ~60x/second. The keys we offer do nothing on their
-//! own in most apps, so this is safe and needs no root or `input` group.
+//! This file holds what both platforms share — which keys exist and what
+//! they are called. Watching them is platform work:
 //!
-//! One thread watches every configured key; `Hotkeys::set` swaps the keys
-//! live when the settings change.
+//! * Linux (X11): poll the keyboard state, never grabbing keys (`x11.rs`).
+//! * Windows: a low-level keyboard hook that also keeps the hotkeys away
+//!   from the focused app, so F12 does not open DevTools (`windows.rs`).
 
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+#[cfg(windows)]
+mod windows;
+#[cfg(unix)]
+mod x11;
 
-use tokio::sync::mpsc::UnboundedSender;
-use x11rb::connection::Connection;
-use x11rb::protocol::xproto::ConnectionExt as _;
+#[cfg(windows)]
+pub use windows::Hotkeys;
+#[cfg(unix)]
+pub use x11::Hotkeys;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyId {
@@ -27,6 +29,20 @@ pub enum KeyId {
 pub struct HotkeyEvent {
     pub key: KeyId,
     pub down: bool,
+}
+
+/// A key Lalia can watch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    /// F1–F35 (Windows keyboards stop at F24).
+    F(u8),
+    Pause,
+    ScrollLock,
+    Insert,
+    Menu,
+    RightCtrl,
+    RightAlt,
+    RightSuper,
 }
 
 /// Keys offered in the settings window: (config name, label).
@@ -57,126 +73,43 @@ pub const CHOICES: &[(&str, &str)] = &[
     ("Menu", "Menu"),
     ("RightCtrl", "Right Ctrl"),
     ("RightAlt", "Right Alt / AltGr"),
-    ("RightSuper", "Right Super"),
+    ("RightSuper", RIGHT_SUPER),
 ];
+
+#[cfg(windows)]
+const RIGHT_SUPER: &str = "Right Win";
+#[cfg(not(windows))]
+const RIGHT_SUPER: &str = "Right Super";
 
 /// Human label for a configured key name.
 pub fn label(name: &str) -> String {
-    let norm = normalize(name);
+    let key = parse(name);
     CHOICES
         .iter()
-        .find(|(n, _)| normalize(n) == norm)
+        .find(|(n, _)| key.is_some() && parse(n) == key)
         .map(|(_, l)| l.to_string())
         .unwrap_or_else(|| name.to_string())
 }
 
-fn normalize(name: &str) -> String {
-    name.trim()
+/// Parse a key name from the config ("F12", "right_ctrl", "Scroll Lock"…).
+pub fn parse(name: &str) -> Option<Key> {
+    let norm = name
+        .trim()
         .to_ascii_lowercase()
-        .replace(['_', '-', ' '], "")
-}
-
-/// X11 keysyms for a key name (several when layouts differ, e.g. AltGr).
-pub fn keysyms(name: &str) -> Option<Vec<u32>> {
-    let norm = normalize(name);
-    if let Some(n) = norm.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()) {
-        // F1 = 0xFFBE ... F35 = 0xFFE0
-        return (1..=35).contains(&n).then(|| vec![0xFFBE + (n - 1)]);
+        .replace(['_', '-', ' '], "");
+    if let Some(n) = norm.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
+        return (1..=35).contains(&n).then_some(Key::F(n));
     }
-    let syms = match norm.as_str() {
-        "pause" | "break" => vec![0xFF13],
-        "scrolllock" => vec![0xFF14],
-        "insert" => vec![0xFF63],
-        "menu" => vec![0xFF67],
-        "rightctrl" | "controlr" | "ctrlr" => vec![0xFFE4],
-        "rightalt" | "altr" | "altgr" => vec![0xFFEA, 0xFE03],
-        "rightsuper" | "superr" => vec![0xFFEC],
+    Some(match norm.as_str() {
+        "pause" | "break" => Key::Pause,
+        "scrolllock" => Key::ScrollLock,
+        "insert" => Key::Insert,
+        "menu" | "apps" => Key::Menu,
+        "rightctrl" | "controlr" | "ctrlr" => Key::RightCtrl,
+        "rightalt" | "altr" | "altgr" => Key::RightAlt,
+        "rightsuper" | "superr" | "rightwin" | "winr" => Key::RightSuper,
         _ => return None,
-    };
-    Some(syms)
-}
-
-type Watched = Vec<(KeyId, u8)>;
-
-/// Handle to the polling thread.
-#[derive(Clone)]
-pub struct Hotkeys {
-    keys: Arc<Mutex<Watched>>,
-}
-
-impl Hotkeys {
-    /// Start the polling thread (watching nothing until `set`).
-    pub fn start(tx: UnboundedSender<HotkeyEvent>) -> anyhow::Result<Self> {
-        let (conn, _) = x11rb::connect(None)
-            .map_err(|e| anyhow::anyhow!("cannot connect to the X server: {e}"))?;
-        let keys: Arc<Mutex<Watched>> = Arc::default();
-        let watched = keys.clone();
-        thread::spawn(move || {
-            let mut state: Vec<(KeyId, u8, bool)> = Vec::new();
-            loop {
-                let wanted = watched.lock().map(|k| k.clone()).unwrap_or_default();
-                if wanted.len() != state.len()
-                    || wanted
-                        .iter()
-                        .zip(&state)
-                        .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
-                {
-                    // Keys changed: forget old edges (a held key is reported once).
-                    state = wanted.iter().map(|&(id, kc)| (id, kc, false)).collect();
-                }
-                let reply = conn.query_keymap().ok().and_then(|c| c.reply().ok());
-                let Some(reply) = reply else {
-                    thread::sleep(Duration::from_millis(500));
-                    continue;
-                };
-                for (id, kc, was_down) in &mut state {
-                    let down = reply.keys[(*kc / 8) as usize] & (1 << (*kc % 8)) != 0;
-                    if down != *was_down {
-                        *was_down = down;
-                        if tx.send(HotkeyEvent { key: *id, down }).is_err() {
-                            return; // receiver dropped: shutting down
-                        }
-                    }
-                }
-                thread::sleep(Duration::from_millis(16));
-            }
-        });
-        Ok(Self { keys })
-    }
-
-    /// Watch `main` (dictate) and `pause`. Errors leave the old keys in place.
-    pub fn set(&self, main: &str, pause: &str) -> anyhow::Result<()> {
-        let main_kc = keycode(main)?;
-        let mut watched = vec![(KeyId::Main, main_kc)];
-        let pause_kc = keycode(pause)?;
-        if pause_kc != main_kc {
-            watched.push((KeyId::Pause, pause_kc));
-        }
-        if let Ok(mut k) = self.keys.lock() {
-            *k = watched;
-        }
-        Ok(())
-    }
-}
-
-/// Resolve a key name to a keycode on the current keyboard layout.
-pub fn keycode(name: &str) -> anyhow::Result<u8> {
-    let syms = keysyms(name).ok_or_else(|| anyhow::anyhow!("unknown hotkey '{name}'"))?;
-    let (conn, _) = x11rb::connect(None)?;
-    let setup = conn.setup();
-    let min = setup.min_keycode;
-    let count = setup.max_keycode - min + 1;
-    let mapping = conn.get_keyboard_mapping(min, count)?.reply()?;
-    let per = mapping.keysyms_per_keycode.max(1) as usize;
-    syms.iter()
-        .find_map(|sym| {
-            mapping
-                .keysyms
-                .chunks(per)
-                .position(|chunk| chunk.contains(sym))
-        })
-        .map(|idx| min + idx as u8)
-        .ok_or_else(|| anyhow::anyhow!("hotkey '{name}' not found on this keyboard layout"))
+    })
 }
 
 #[cfg(test)]
@@ -185,28 +118,29 @@ mod tests {
 
     #[test]
     fn function_keys() {
-        assert_eq!(keysyms("F1"), Some(vec![0xFFBE]));
-        assert_eq!(keysyms("f12"), Some(vec![0xFFC9]));
-        assert_eq!(keysyms("F35"), Some(vec![0xFFE0]));
-        assert_eq!(keysyms("F36"), None);
-        assert_eq!(keysyms("F0"), None);
+        assert_eq!(parse("F1"), Some(Key::F(1)));
+        assert_eq!(parse("f12"), Some(Key::F(12)));
+        assert_eq!(parse("F35"), Some(Key::F(35)));
+        assert_eq!(parse("F36"), None);
+        assert_eq!(parse("F0"), None);
     }
 
     #[test]
     fn named_keys() {
-        assert_eq!(keysyms("RightCtrl"), Some(vec![0xFFE4]));
-        assert_eq!(keysyms("right_ctrl"), Some(vec![0xFFE4]));
-        assert_eq!(keysyms("Scroll Lock"), Some(vec![0xFF14]));
-        assert!(keysyms("RightAlt").unwrap().contains(&0xFE03));
-        assert_eq!(keysyms("Space"), None);
+        assert_eq!(parse("RightCtrl"), Some(Key::RightCtrl));
+        assert_eq!(parse("right_ctrl"), Some(Key::RightCtrl));
+        assert_eq!(parse("Scroll Lock"), Some(Key::ScrollLock));
+        assert_eq!(parse("AltGr"), Some(Key::RightAlt));
+        assert_eq!(parse("Space"), None);
     }
 
     #[test]
     fn every_choice_resolves() {
         for (name, _) in CHOICES {
-            assert!(keysyms(name).is_some(), "{name}");
+            assert!(parse(name).is_some(), "{name}");
         }
         assert_eq!(label("rightctrl"), "Right Ctrl");
         assert_eq!(label("F12"), "F12");
+        assert_eq!(label("nonsense"), "nonsense");
     }
 }

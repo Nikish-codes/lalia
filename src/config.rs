@@ -1,7 +1,8 @@
 //! Configuration for Lalia.
 //!
-//! Precedence (lowest → highest): built-in defaults → `~/.config/lalia/config.toml`
-//! → environment variables. The API key may also live in `~/.config/lalia/key`.
+//! Precedence (lowest → highest): built-in defaults → `config.toml` → environment
+//! variables. The file lives in `~/.config/lalia` on Linux and `%APPDATA%\lalia`
+//! on Windows, next to the API key (`key`).
 
 use std::env;
 use std::fs;
@@ -131,14 +132,19 @@ pub struct Config {
 
 pub const DEFAULT_MODEL: &str = "gemini-3.5-transcribe-live";
 
+/// Settings and the API key: `~/.config/lalia` (or `%APPDATA%\lalia`).
+#[cfg(unix)]
 pub fn config_dir() -> PathBuf {
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
+/// History: `~/.local/share/lalia` (or `%LOCALAPPDATA%\lalia`).
+#[cfg(unix)]
 pub fn data_dir() -> PathBuf {
     xdg_dir("XDG_DATA_HOME", ".local/share")
 }
 
+#[cfg(unix)]
 fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
     if let Ok(xdg) = env::var(var) {
         if !xdg.is_empty() {
@@ -148,8 +154,31 @@ fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
     home().join(fallback).join("lalia")
 }
 
+#[cfg(unix)]
 pub fn home() -> PathBuf {
     PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into()))
+}
+
+/// Settings and the API key: `~/.config/lalia` (or `%APPDATA%\lalia`).
+#[cfg(windows)]
+pub fn config_dir() -> PathBuf {
+    windows_dir("APPDATA", "AppData\\Roaming")
+}
+
+/// History: `~/.local/share/lalia` (or `%LOCALAPPDATA%\lalia`).
+#[cfg(windows)]
+pub fn data_dir() -> PathBuf {
+    windows_dir("LOCALAPPDATA", "AppData\\Local")
+}
+
+#[cfg(windows)]
+fn windows_dir(var: &str, fallback: &str) -> PathBuf {
+    match env::var(var) {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join("lalia"),
+        _ => PathBuf::from(env::var("USERPROFILE").unwrap_or_else(|_| ".".into()))
+            .join(fallback)
+            .join("lalia"),
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -206,7 +235,8 @@ pub fn read_key_file() -> Option<String> {
         .map(str::to_string)
 }
 
-/// Store an API key in `~/.config/lalia/key` with 0600 permissions.
+/// Store an API key in the `key` file (0600 on Linux; on Windows the user's
+/// profile folder is already private to them).
 pub fn set_api_key(key: &str) -> anyhow::Result<PathBuf> {
     let dir = config_dir();
     fs::create_dir_all(&dir)?;
@@ -506,7 +536,7 @@ overlay_style = "buddy"       # "buddy" (animated character) | "pill"
 notify = true
 sound = true
 
-# Keep a local history of what you dictated (~/.local/share/lalia).
+# Keep a local history of what you dictated (on this computer only).
 history = true
 
 # Start listening (not paused) when Lalia launches.

@@ -8,7 +8,6 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -150,14 +149,12 @@ struct App {
 
 /// Run the daemon until "Quit". Returns early if another instance runs.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
-    let Some(listener) = ipc::claim(&ipc::daemon_socket())? else {
+    let Some(server) = ipc::claim(ipc::Endpoint::Daemon)? else {
         // Already running: launching Lalia again opens its window.
         let _ = ipc::daemon("settings home");
         eprintln!("[lalia] Lalia is already running — opening its settings window.");
         return Ok(());
     };
-    listener.set_nonblocking(true)?;
-    let listener = tokio::net::UnixListener::from_std(listener)?;
 
     let version = env!("CARGO_PKG_VERSION");
     println!("lalia {version} — system-wide live dictation (Greek λαλιά, \"speech\")");
@@ -179,31 +176,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Control socket.
+    // Control channel (CLI, tray, settings window).
     {
         let tx = tx.clone();
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let (read, mut write) = stream.into_split();
-                    let mut line = String::new();
-                    if BufReader::new(read).read_line(&mut line).await.is_err() {
-                        return;
-                    }
-                    let reply = match Command::parse(&line) {
-                        Some(cmd) => {
-                            let (otx, orx) = oneshot::channel();
-                            if tx.send(AppEvent::Command(cmd, Some(otx))).is_err() {
-                                return;
-                            }
-                            orx.await.unwrap_or_else(|_| "error".into())
-                        }
-                        None => format!("error: unknown command '{}'", line.trim()),
-                    };
-                    let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
-                });
+        server.serve(move |line| match Command::parse(&line) {
+            Some(cmd) => {
+                let (otx, orx) = oneshot::channel();
+                if tx.send(AppEvent::Command(cmd, Some(otx))).is_err() {
+                    return "error".into();
+                }
+                orx.blocking_recv().unwrap_or_else(|_| "error".into())
             }
+            None => format!("error: unknown command '{}'", line.trim()),
         });
     }
 
@@ -254,6 +238,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         recent,
     };
     app.apply_hotkeys();
+    app.hotkeys.set_paused(!app.enabled);
     app.tray = tray::spawn(app.tray_state(), tx.clone()).await;
 
     let key = hotkey::label(&app.cfg.hotkey);
@@ -430,6 +415,7 @@ impl App {
             return;
         }
         self.enabled = on;
+        self.hotkeys.set_paused(!on);
         if !on && self.session.is_some() {
             self.finalize();
         }
@@ -749,7 +735,10 @@ impl App {
             Command::Reload => self.reload(),
             Command::Quit => {
                 self.finalize();
-                let _ = std::fs::remove_file(ipc::daemon_socket());
+                ipc::release(ipc::Endpoint::Daemon);
+                if let Some(t) = &self.tray {
+                    tray::remove(t);
+                }
                 eprintln!("[lalia] bye");
                 // Exit once the reply has gone out.
                 tokio::spawn(async {
@@ -827,6 +816,11 @@ fn friendly_error(raw: &str) -> (&'static str, String) {
         (
             "Gemini quota reached",
             "Your API key is out of quota for now. Try again later or use another key.".into(),
+        )
+    } else if has(&["blocked the typing"]) {
+        (
+            "Can't type here",
+            "Windows doesn't let Lalia type into apps that run as administrator.".into(),
         )
     } else if has(&["xdotool"]) {
         (

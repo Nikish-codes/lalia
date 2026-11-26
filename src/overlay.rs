@@ -1,12 +1,11 @@
-//! The on-screen indicator: a small pill near the bottom (or top) of the
-//! screen with the Lalia icon, what Lalia is doing, the words it hears and a
-//! live level meter.
+//! The on-screen indicator: Lali the buddy, or a small pill, near the bottom
+//! (or top) of the screen while you dictate.
 //!
-//! It is a raw X11 override-redirect window with an empty input shape, so it
-//! never takes focus or clicks — typing keeps going to the window you were
-//! in. With a compositor it is translucent with a soft shadow and fades in and
-//! out; without one it is shaped to the rounded pill. Drawing uses tiny-skia
-//! and ab_glyph on its own thread.
+//! The window never takes focus or clicks — typing keeps going to the window
+//! you were in. This file holds the state, the frame loop and the pill
+//! drawing; `buddy.rs` draws Lali; the window itself is platform work
+//! (`overlay/x11.rs`, `overlay/windows.rs`). Drawing uses tiny-skia and
+//! ab_glyph on its own thread.
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -17,13 +16,12 @@ use tiny_skia::{
     Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
     Rect, Shader, SpreadMode, Stroke, Transform,
 };
-use x11rb::connection::{Connection, RequestConnection};
-use x11rb::protocol::randr::ConnectionExt as _;
-use x11rb::protocol::shape::{self, ConnectionExt as _};
-use x11rb::protocol::xfixes::ConnectionExt as _;
-use x11rb::protocol::xproto::*;
-use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
+#[cfg(windows)]
+#[path = "overlay/windows.rs"]
+mod backend;
+#[cfg(unix)]
+#[path = "overlay/x11.rs"]
+mod backend;
 
 use crate::audio::Level;
 use crate::buddy;
@@ -149,7 +147,7 @@ impl Overlay {
 }
 
 // ---------------------------------------------------------------------------
-// X11 side
+// The window and its frame loop
 // ---------------------------------------------------------------------------
 
 const PILL_W: f32 = 440.0;
@@ -157,285 +155,16 @@ const PILL_H: f32 = 60.0;
 const SHADOW: f32 = 16.0;
 const MARGIN_EDGE: f32 = 72.0;
 
+/// The window while it is on screen (it is destroyed when hidden, so a
+/// changed DPI, monitor or compositor is picked up the next time).
 struct Surface {
-    win: Window,
-    gc: Gcontext,
-    depth: u8,
-    argb: bool,
+    win: backend::Window,
+    /// Per-pixel transparency (else an opaque pill-shaped window).
+    transparent: bool,
     /// Drawing the animated buddy (else the pill).
     buddy: bool,
-    w: u16,
-    h: u16,
-    mapped: bool,
-}
-
-fn atom(conn: &RustConnection, name: &str) -> anyhow::Result<Atom> {
-    Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
-}
-
-fn has_compositor(conn: &RustConnection, screen_num: usize) -> bool {
-    atom(conn, &format!("_NET_WM_CM_S{screen_num}"))
-        .ok()
-        .and_then(|a| conn.get_selection_owner(a).ok()?.reply().ok())
-        .map(|r| r.owner != x11rb::NONE)
-        .unwrap_or(false)
-}
-
-fn argb_visual(screen: &Screen) -> Option<Visualid> {
-    screen
-        .allowed_depths
-        .iter()
-        .filter(|d| d.depth == 32)
-        .flat_map(|d| d.visuals.iter())
-        .find(|v| v.class == VisualClass::TRUE_COLOR)
-        .map(|v| v.visual_id)
-}
-
-/// Desktop scale from `Xft.dpi` (96 dpi = 1.0).
-fn scale_factor(conn: &RustConnection, root: Window) -> f32 {
-    let dpi = conn
-        .get_property(
-            false,
-            root,
-            AtomEnum::RESOURCE_MANAGER,
-            AtomEnum::STRING,
-            0,
-            1 << 16,
-        )
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .and_then(|r| {
-            let text = String::from_utf8_lossy(&r.value).to_string();
-            text.lines()
-                .find_map(|l| l.strip_prefix("Xft.dpi:"))
-                .and_then(|v| v.trim().parse::<f32>().ok())
-        })
-        .unwrap_or(96.0);
-    (dpi / 96.0).clamp(1.0, 3.0)
-}
-
-/// Geometry (x, y, w, h) of the monitor under the mouse pointer.
-fn pointer_monitor(conn: &RustConnection, screen: &Screen) -> (i32, i32, i32, i32) {
-    let full = (
-        0,
-        0,
-        screen.width_in_pixels as i32,
-        screen.height_in_pixels as i32,
-    );
-    let pointer = conn
-        .query_pointer(screen.root)
-        .ok()
-        .and_then(|c| c.reply().ok());
-    let monitors = conn
-        .randr_get_monitors(screen.root, true)
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .map(|r| r.monitors)
-        .unwrap_or_default();
-    let rect = |m: &x11rb::protocol::randr::MonitorInfo| {
-        (m.x as i32, m.y as i32, m.width as i32, m.height as i32)
-    };
-    if let Some(p) = pointer {
-        let (px, py) = (p.root_x as i32, p.root_y as i32);
-        if let Some(m) = monitors.iter().find(|m| {
-            let (x, y, w, h) = rect(m);
-            px >= x && px < x + w && py >= y && py < y + h
-        }) {
-            return rect(m);
-        }
-    }
-    monitors
-        .iter()
-        .find(|m| m.primary)
-        .or(monitors.first())
-        .map(rect)
-        .unwrap_or(full)
-}
-
-fn create_surface(
-    conn: &RustConnection,
-    screen: &Screen,
-    scale: f32,
-    composited: bool,
-    want_buddy: bool,
-) -> anyhow::Result<Surface> {
-    let visual = if composited {
-        argb_visual(screen)
-    } else {
-        None
-    };
-    let argb = visual.is_some();
-    // The buddy needs real transparency; without a compositor use the pill.
-    let buddy = want_buddy && argb;
-    let pad = if argb { SHADOW } else { 0.0 };
-    let (w, h) = if buddy {
-        (buddy::WIDTH * scale, buddy::HEIGHT * scale)
-    } else {
-        ((PILL_W + 2.0 * pad) * scale, (PILL_H + 2.0 * pad) * scale)
-    };
-    let (w, h) = (w.round() as u16, h.round() as u16);
-
-    let win = conn.generate_id()?;
-    let (depth, visual_id, colormap) = match visual {
-        Some(v) => {
-            let cmap = conn.generate_id()?;
-            conn.create_colormap(ColormapAlloc::NONE, cmap, screen.root, v)?;
-            (32, v, cmap)
-        }
-        None => (
-            screen.root_depth,
-            screen.root_visual,
-            screen.default_colormap,
-        ),
-    };
-    let aux = CreateWindowAux::new()
-        .override_redirect(1)
-        .background_pixel(0)
-        .border_pixel(0)
-        .colormap(colormap);
-    conn.create_window(
-        depth,
-        win,
-        screen.root,
-        0,
-        0,
-        w,
-        h,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        visual_id,
-        &aux,
-    )?;
-    conn.change_property8(
-        PropMode::REPLACE,
-        win,
-        AtomEnum::WM_NAME,
-        AtomEnum::STRING,
-        b"Lalia",
-    )?;
-    conn.change_property8(
-        PropMode::REPLACE,
-        win,
-        AtomEnum::WM_CLASS,
-        AtomEnum::STRING,
-        b"lalia-overlay\0Lalia\0",
-    )?;
-    if let (Ok(kind), Ok(notification)) = (
-        atom(conn, "_NET_WM_WINDOW_TYPE"),
-        atom(conn, "_NET_WM_WINDOW_TYPE_NOTIFICATION"),
-    ) {
-        conn.change_property32(
-            PropMode::REPLACE,
-            win,
-            kind,
-            AtomEnum::ATOM,
-            &[notification],
-        )?;
-    }
-
-    // Click-through: an empty input region.
-    if conn.xfixes_query_version(5, 0).is_ok() {
-        let region = conn.generate_id()?;
-        conn.xfixes_create_region(region, &[])?;
-        conn.xfixes_set_window_shape_region(win, shape::SK::INPUT, 0, 0, region)?;
-        conn.xfixes_destroy_region(region)?;
-    }
-    // Without a compositor, cut the window to the rounded pill.
-    if !argb {
-        let r = h as f32 / 2.0;
-        let rects: Vec<Rectangle> = (0..h)
-            .map(|row| {
-                let dy = (row as f32 + 0.5 - r).abs();
-                let inset = (r - (r * r - dy * dy).max(0.0).sqrt()).ceil() as i16;
-                Rectangle {
-                    x: inset,
-                    y: row as i16,
-                    width: (w as i16 - 2 * inset).max(0) as u16,
-                    height: 1,
-                }
-            })
-            .collect();
-        conn.shape_rectangles(
-            shape::SO::SET,
-            shape::SK::BOUNDING,
-            ClipOrdering::UNSORTED,
-            win,
-            0,
-            0,
-            &rects,
-        )?;
-    }
-
-    let gc = conn.generate_id()?;
-    conn.create_gc(gc, win, &CreateGCAux::new())?;
-    Ok(Surface {
-        win,
-        gc,
-        depth,
-        argb,
-        buddy,
-        w,
-        h,
-        mapped: false,
-    })
-}
-
-fn place(conn: &RustConnection, screen: &Screen, s: &Surface, scale: f32, pos: OverlayPosition) {
-    let (mx, my, mw, mh) = pointer_monitor(conn, screen);
-    let x = mx + (mw - s.w as i32) / 2;
-    // The buddy's window has room for rings around it, so it sits closer.
-    let edge = if s.buddy {
-        MARGIN_EDGE * 0.55
-    } else {
-        MARGIN_EDGE
-    };
-    let y = match pos {
-        OverlayPosition::Bottom => my + mh - s.h as i32 - (edge * scale) as i32,
-        OverlayPosition::Top => my + (edge * 0.6 * scale) as i32,
-    };
-    let _ = conn.configure_window(
-        s.win,
-        &ConfigureWindowAux::new()
-            .x(x)
-            .y(y)
-            .stack_mode(StackMode::ABOVE),
-    );
-}
-
-fn present(conn: &RustConnection, s: &Surface, pm: &Pixmap, msb_first: bool) -> anyhow::Result<()> {
-    let mut data = Vec::with_capacity(pm.data().len());
-    for px in pm.data().as_chunks::<4>().0 {
-        let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
-        if msb_first {
-            data.extend_from_slice(&[a, r, g, b]);
-        } else {
-            data.extend_from_slice(&[b, g, r, a]);
-        }
-    }
-    let row_bytes = s.w as usize * 4;
-    let max = conn
-        .maximum_request_bytes()
-        .saturating_sub(64)
-        .max(row_bytes);
-    let rows_per = (max / row_bytes).max(1);
-    let mut y = 0usize;
-    while y < s.h as usize {
-        let rows = rows_per.min(s.h as usize - y);
-        conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            s.win,
-            s.gc,
-            s.w,
-            rows as u16,
-            0,
-            y as i16,
-            0,
-            s.depth,
-            &data[y * row_bytes..(y + rows) * row_bytes],
-        )?;
-        y += rows;
-    }
-    Ok(())
+    w: u32,
+    h: u32,
 }
 
 struct Snapshot {
@@ -450,10 +179,7 @@ struct Snapshot {
 }
 
 fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()> {
-    let (conn, screen_num) = RustConnection::connect(None)?;
-    let screen = conn.setup().roots[screen_num].clone();
-    let msb_first = conn.setup().image_byte_order == ImageOrder::MSB_FIRST;
-    let _ = conn.randr_query_version(1, 5).map(|c| c.reply());
+    let backend = backend::Backend::connect()?;
     let regular = FontRef::try_from_slice(FONT_REGULAR)?;
     let semibold = FontRef::try_from_slice(FONT_SEMIBOLD)?;
 
@@ -472,15 +198,16 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
 
     loop {
         let timeout = match surface.as_ref() {
-            Some(s) if s.mapped && s.buddy => Duration::from_millis(20),
-            Some(s) if s.mapped => Duration::from_millis(33),
-            _ => Duration::from_millis(400),
+            Some(s) if s.buddy => Duration::from_millis(20),
+            Some(_) => Duration::from_millis(33),
+            None => Duration::from_millis(400),
         };
         match wake.recv_timeout(timeout) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
         }
         while wake.try_recv().is_ok() {}
+        backend.pump();
 
         let snap = {
             let mut m = model
@@ -507,30 +234,38 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
         let dt = now.duration_since(last).as_secs_f32().min(0.1);
         last = now;
 
-        if want && surface.as_ref().map(|s| !s.mapped).unwrap_or(true) {
-            if surface.is_none() {
-                scale = scale_factor(&conn, screen.root);
-                surface = Some(create_surface(
-                    &conn,
-                    &screen,
-                    scale,
-                    has_compositor(&conn, screen_num),
-                    snap.style == OverlayStyle::Buddy,
-                )?);
-                anim.reset();
-            }
-            if let Some(s) = surface.as_mut() {
-                place(&conn, &screen, s, scale, snap.position);
-                conn.map_window(s.win)?;
-                s.mapped = true;
-            }
+        if want && surface.is_none() {
+            scale = backend.scale();
+            let transparent = backend.transparent();
+            // The buddy needs real transparency; otherwise use the pill.
+            let buddy = snap.style == OverlayStyle::Buddy && transparent;
+            let pad = if transparent { SHADOW } else { 0.0 };
+            let (w, h) = if buddy {
+                (buddy::WIDTH * scale, buddy::HEIGHT * scale)
+            } else {
+                ((PILL_W + 2.0 * pad) * scale, (PILL_H + 2.0 * pad) * scale)
+            };
+            let (w, h) = (w.round() as u32, h.round() as u32);
+            let win = backend.create(w, h, transparent)?;
+            // The buddy's window has room for rings around it, so it sits closer.
+            let edge = if buddy {
+                MARGIN_EDGE * 0.55
+            } else {
+                MARGIN_EDGE
+            };
+            backend.show(&win, snap.position, (edge * scale) as i32)?;
+            anim.reset();
+            surface = Some(Surface {
+                win,
+                transparent,
+                buddy,
+                w,
+                h,
+            });
         }
-        let Some(s) = surface.as_mut() else { continue };
-        if !s.mapped {
-            continue;
-        }
+        let Some(s) = surface.as_ref() else { continue };
 
-        if s.argb {
+        if s.transparent {
             let out = if s.buddy { 0.24 } else { 0.18 };
             fade = if want {
                 (fade + dt / 0.12).min(1.0)
@@ -541,13 +276,9 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
             fade = if want { 1.0 } else { 0.0 };
         }
         if fade <= 0.0 && !want {
-            conn.unmap_window(s.win)?;
-            s.mapped = false;
-            conn.flush()?;
-            // Recreate next time so a changed DPI or compositor is picked up.
-            conn.destroy_window(s.win)?;
-            conn.flush()?;
-            surface = None;
+            if let Some(s) = surface.take() {
+                backend.destroy(s.win);
+            }
             continue;
         }
 
@@ -558,8 +289,7 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
             smooth_level * 0.85
         };
 
-        let mut pm =
-            Pixmap::new(s.w as u32, s.h as u32).ok_or_else(|| anyhow::anyhow!("overlay pixmap"))?;
+        let mut pm = Pixmap::new(s.w, s.h).ok_or_else(|| anyhow::anyhow!("overlay pixmap"))?;
         if s.buddy {
             let frame = buddy::Frame {
                 phase: snap.phase,
@@ -569,8 +299,7 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
             };
             anim.step(dt, &frame, &fonts);
             buddy::draw(&mut pm, &fonts, &anim, &frame, scale, fade, !want);
-            present(&conn, s, &pm, msb_first)?;
-            conn.flush()?;
+            backend.present(&s.win, &pm)?;
             continue;
         }
         let state = match snap.phase {
@@ -592,15 +321,14 @@ fn run(model: Arc<Mutex<Model>>, wake: mpsc::Receiver<()>) -> anyhow::Result<()>
             icon_pm,
             DrawParams {
                 scale,
-                pad: if s.argb { SHADOW } else { 0.0 },
+                pad: if s.transparent { SHADOW } else { 0.0 },
                 alpha: fade,
                 level: smooth_level,
                 t: started.elapsed().as_secs_f32(),
-                shadow: s.argb,
+                shadow: s.transparent,
             },
         );
-        present(&conn, s, &pm, msb_first)?;
-        conn.flush()?;
+        backend.present(&s.win, &pm)?;
     }
 }
 
