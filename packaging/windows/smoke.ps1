@@ -21,6 +21,8 @@ public static class Native {
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam);
 }
@@ -113,12 +115,15 @@ Check "daemon is idle again after the attempt" ($after.phase -eq "idle")
 $tray = [Native]::FindWindowW("LaliaTray", "Lalia")   # ($null would be passed as "")
 Check "tray window exists" ($tray -ne [IntPtr]::Zero)
 try {
-    # Win+B focuses the notification area's overflow arrow; Enter opens it.
-    [Native]::keybd_event($VK_LWIN, 0, 0, [UIntPtr]::Zero); Key $VK_B 60
-    [Native]::keybd_event($VK_LWIN, 0, 2, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 800; Key $VK_RETURN 60; Start-Sleep 2
+    # Click the "^" (hidden icons) arrow left of the clock: new icons start there.
+    $screen = [System.Windows.Forms.SystemInformation]::PrimaryMonitorSize
+    [Native]::SetCursorPos($screen.Width - 222, $screen.Height - 24) | Out-Null
+    Start-Sleep -Milliseconds 300
+    [Native]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero); [Native]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep 2
     Shot "3b-tray-overflow"
     Key $VK_ESCAPE 60; Start-Sleep 1
+    [Native]::SetCursorPos([int]($screen.Width / 2), [int]($screen.Height / 3)) | Out-Null
     # A right-click on the icon, as the shell reports it: the menu opens.
     [Native]::PostMessageW($tray, $WM_TRAY, [UIntPtr]::Zero, [IntPtr]$WM_RBUTTONUP) | Out-Null
     Start-Sleep 2
