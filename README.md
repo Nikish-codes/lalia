@@ -18,6 +18,8 @@ animated buddy — bobs along to your voice and shows the words it hears. There'
 
 ![Lalia settings window](docs/settings.png)
 
+<p align="center"><img src="docs/windows.png" width="720" alt="Lalia on Windows 11"><br><em>On Windows 11</em></p>
+
 It runs on **Gemini 3.5 Transcribe Live** — the exact model and technique
 Antigravity's record button uses (the Live API's `BidiGenerateContent` +
 `inputAudioTranscription`).
